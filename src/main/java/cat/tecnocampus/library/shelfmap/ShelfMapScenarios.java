@@ -111,7 +111,10 @@ class ShelfMapScenarios {
             Measured<T> measured = measurement.sql(map);
             byte[] body = json.writeValueAsBytes(measured.value());
             Timing timing = measurement.time(WARMUPS, SAMPLES, () -> json.writeValueAsBytes(map.get()));
-            Measurement.HeapUse heap = measurement.heap(() -> json.writeValueAsBytes(map.get()));
+            // The heap run, the leak check and the reference send SQL of their own; with the log on it
+            // would be read as part of the measured call. Only the first call is counted and logged.
+            Measurement.HeapUse heap = measurement.withoutSqlLog(
+                    () -> measurement.heap(() -> json.writeValueAsBytes(map.get())));
 
             Map<UUID, CopyStatus> shown = statuses.apply(measured.value());
             Map<CopyStatus, Long> byStatus = new TreeMap<>(shown.values().stream()
@@ -126,7 +129,8 @@ class ShelfMapScenarios {
                     .result("peak heap growth (service + JSON)", heap.peakIncrease())
                     .result("reservation ids or deadlines in the JSON", leaks(body));
             if (reference != null) {
-                report.result("same copies and statuses as the naive version", shown.equals(reference.get()));
+                Map<UUID, CopyStatus> expected = measurement.withoutSqlLog(reference);
+                report.result("same copies and statuses as the naive version", shown.equals(expected));
             }
             addNotes(report);
             report.note("100 of the 500 reservations have expired: they are shown as AVAILABLE without any cleanup.");
@@ -135,7 +139,7 @@ class ShelfMapScenarios {
 
         private long leaks(byte[] body) {
             String text = new String(body, StandardCharsets.UTF_8);
-            List<UUID> ids = reservations.findAllIds();
+            List<UUID> ids = measurement.withoutSqlLog(reservations::findAllIds);
             long leakedIds = ids.stream().filter(id -> text.contains(id.toString())).count();
             boolean leakedFields = text.contains("reservationId") || text.contains("reservedUntil");
             return leakedIds + (leakedFields ? 1 : 0);
