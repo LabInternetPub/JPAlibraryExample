@@ -47,6 +47,7 @@ GET {{host}}/better/branches/Central/shelf-map
 GET {{host}}/better/branches/Nowhere/shelf-map
 
 ### Import — naive: 5,000 rows imported twice (about 40 s; the cost grows with the square of the rows)
+# @timeout 300
 POST {{host}}/scenarios/import-naive
 
 ### Import — batched: the same 5,000 rows, then 20,000

@@ -93,11 +93,14 @@ a copy or until when. Endpoints: `GET /naive/branches/Central/shelf-map`,
 
 | Scenario | What it does | What to show |
 | --- | --- | --- |
-| `import-naive` | Imports 5,000 rows into Annex, then the same file again: lookups and `save()` per row | About 21 s; 15,001 statements; 5,000 JDBC batches of one insert each |
+| `import-naive` | Imports 5,000 rows into Annex, then the same file again: lookups and `save()` per row | First import: about 21 s; 15,001 statements; 5,000 JDBC batches of one insert each |
 | `import-batched` | The same 5,000 rows, then 20,000: one lookup for all rows, `persist()`, flush + clear every 500 | About 0.3 s for 5,000 rows and 0.5 s for 20,000; 3 statements and 40 batches |
 
-**`import-naive` takes about 40 seconds.** Its cost grows with the square of the rows, which is
-why it runs 5,000 rows and not 20,000 (that took about seven minutes). The `.http` file also
+**The whole `import-naive` scenario (both imports) takes about 40 seconds**, longer on a slower
+machine. Its request in `scenarios.http` raises the HTTP Client read timeout (`# @timeout 300`):
+without it the client can give up with a `ReadTimeoutException` while the server is still
+importing (`--scenario=import-naive` on the command line has no such limit). The cost grows with
+the square of the rows, which is why it runs 5,000 rows and not 20,000 (that took about seven minutes). The `.http` file also
 uploads `annex-5000-error-last-row.csv`, whose last row has an unknown ISBN. The import answers
 `400` with the line number and imports nothing: the naive version writes 4,999 copies before it
 finds the error, and the rollback undoes them.
