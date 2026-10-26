@@ -481,67 +481,89 @@ a deadlock; more than five copies → member limit; the endpoint over HTTP (`201
 **Learned:** write skew vs lost update, phantoms, why the copy locks do not help, why
 `REPEATABLE READ` does not help, materializing the invariant as one locked row, lock order.
 
-**Endpoints:** the same reservation endpoints; the limit is part of reserving.
+**Endpoints:** the limit is part of reserving. `POST /better/reservations` (lesson 4: copies
+locked, count unlocked) is this lesson's naive version; `POST /better/reservations/member-locked`
+(`MemberLockingReservationService`) is the better one. Over the limit: `409` problem+json, type
+`/problems/member-limit-exceeded`, with `activeItems` and `requested`.
 
-**Scenarios:** `member-limit-naive` and `member-limit-locked`. One member with no items. Two
-requests ("two browser tabs") for 3 different copies each, released together with the barrier
-after the count. A third, single request from a new member shows the first attempt is accepted.
+**Scenarios** (`MemberLimitScenarios`): `member-limit-naive` and `member-limit-locked`. `member53`
+starts with two open loans (`DemoReset.lend`), so the count visibly includes loans. Then two
+requests ("two browser tabs") of `member53` for two different copies each, released together;
+the race window sits after the count (naive) or before the member lock (better). Finally a single
+request of `member54`, who has nothing, shows that a first request is accepted.
 
 ```mermaid
 sequenceDiagram
-    participant T1 as Tab 1 (copies 1-3)
-    participant T2 as Tab 2 (copies 4-6)
+    participant T1 as Tab 1 (N0011, N0012)
+    participant T2 as Tab 2 (N0013, N0014)
     participant DB as PostgreSQL
-    Note over T1,DB: Naive: both count 0
-    T1->>DB: count active items → 0
-    T2->>DB: count active items → 0
-    T1->>DB: lock copies 1-3, reserve, commit
-    T2->>DB: lock copies 4-6, reserve, commit
+    Note over T1,DB: Naive: both count 2 (the loans)
+    T1->>DB: count active items → 2
+    T2->>DB: count active items → 2
+    T1->>DB: lock N0011, N0012, reserve, commit
+    T2->>DB: lock N0013, N0014, reserve, commit
     Note over T1,DB: 6 items: write skew (no common row)
     Note over T1,DB: Better: lock the member row first
     T1->>DB: select member … for update
     T2->>DB: select member … for update (waits)
-    T1->>DB: count 0, reserve 3, commit
-    T2->>DB: count 3 → 3+3 > 5 → 409
+    T1->>DB: count 2, reserve 2, commit
+    T2->>DB: count 4 → 4 + 2 > 5 → rollback, 409
 ```
+
+**Measured** (one run of both scenarios):
+
+| Scenario | Active items before | Outcomes of the two tabs | Active items afterwards | New member's first request |
+| --- | --- | --- | --- | --- |
+| `member-limit-naive` | 2 (loans) | 2 × `201` | **6** (limit 5) | `201` |
+| `member-limit-locked` | 2 (loans) | 1 × `201`, 1 × `409` member limit | 4 | `201` |
 
 | Piece of code | Concept learned |
 | --- | --- |
 | `MemberLimit.check(existing, requested)` | The rule in the domain, correct for one request |
-| `ReservationRepository.countActiveItems(member, now)` (JPQL sum over live reservations + count of open loans) | The invariant is over a **set** of rows |
-| Naive: count, `raceWindow.pause()`, then the locking reservation of lesson 4 | Copy locks do not help: the copies are different |
-| `memberRepository.lockById(id)` (`@Lock(PESSIMISTIC_WRITE)`) before the count | The write skew becomes a conflict on one existing row |
-| Lock order in `LockingReservationService`: member → copies | Same order everywhere avoids deadlocks |
+| `ReservationRepository.countActiveItems(member, now)` (one JPQL statement: live reservations' quantities + open loans) | The invariant is over a **set** of rows |
+| `LockingReservationService` used as the naive version: count, `raceWindow.pause()`, lock the copies | Copy locks do not help: the copies are different, so the tabs never wait for each other |
+| `MemberLockingReservationService`: `raceWindow.pause()`, `memberRepository.lockById(id)` (`@Lock(PESSIMISTIC_WRITE)`), then the count | The write skew becomes a conflict on one existing row; the second tab counts the first tab's reservation |
+| Lock order member → copies | The same order everywhere avoids deadlocks |
 | `MemberLimitExceededException` → `409` with its own problem `type` | The client can tell "limit" from "copy taken" |
-
-**Report:** statuses of the two tabs, items held by the member afterwards, first-attempt result.
+| `DemoReset.lend(...)` (`new Loan(member, copy, now)`) | Loans count too; the scenario starts from a known state |
 
 **Discussion points:** a `FOR UPDATE` on the member's existing reservations locks nothing for a
-member with none; `REPEATABLE READ` gives both tabs the same snapshot of 0; a limit per member and
-branch would need a counter row that does not exist on the first attempt.
+member with none, and cannot see the reservation the other tab is inserting (a phantom);
+`REPEATABLE READ` gives both tabs the same snapshot; a limit per member **and branch**, kept in its
+own counter row, would have no row to lock on the first request, which is where a native
+`INSERT … ON CONFLICT` would be justified. Locking the member serializes all of that member's
+reservations; other members are not affected.
 
-**Example tests:** two concurrent tabs → one `201`, one `409` (Testcontainers); first request of a
-new member accepted; `MemberLimit` boundaries 5 and 6 (unit).
+**Example tests** (`MemberLimitReservationTest`, plus `MemberLimitTest` for the boundaries): loans
+count towards the limit one request at a time (2 loans + 2 reserved, then 2 more → refused with
+existing 4); copies locked only → both tabs succeed, 6 items; member locked → one success, one
+`MemberLimitExceededException`, 4 items; a member's first request accepted; the endpoint answers
+`409` with type `/problems/member-limit-exceeded`.
 
 ## 9. Package layout
 
 ```text
 cat.tecnocampus.library
+├── (root)            LibraryApplication, ClockConfiguration
 ├── domain            Author, Book, Subject, Branch, Copy, Member, Loan, Reservation, MemberLimit, enums, exceptions
 ├── persistence       Spring Data repositories, projection records (IsbnRef, BarcodeRef, BookRow, ShelfRow)
-├── importing         CopyCsvParser, NaiveCopyImportService, BatchedCopyImportService, ImportController
+├── importing         CopyCsvParser, CopyRow, ImportResult, NaiveCopyImportService, BatchedCopyImportService,
+│                     ImportController
 ├── catalogue         NaiveCatalogueService, JoinFetchCatalogueService, ProjectionCatalogueService, CatalogueController
 ├── shelfmap          NaiveShelfMapService, ProjectedShelfMapService, ShelfMapController
-├── reservation       NaiveReservationService, LockingReservationService, ReservationController
+├── reservation       NaiveReservationService, LockingReservationService, MemberLockingReservationService,
+│                     ReservationLookupService, ReservationController
 ├── web               ProblemDetailsHandler
 └── scenario          Scenario, ScenarioRegistry, ScenarioRunner, ScenarioController, ScenarioReport,
                       Measurement, JdbcExecutionCounter, SqlCounts, Measured, Timing,
-                      RaceWindow, ConcurrentRun, DemoReset
-                      (each scenario class lives in the package of its lesson)
+                      RaceWindow, ConcurrentRun, DemoReset, SimpleScenario
+                      (each lesson's scenarios live in its package: CatalogueScenarios,
+                      ShelfMapScenarios, ImportScenarios, ReservationScenarios, MemberLimitScenarios)
 ```
 
-Lessons 4 and 5 share the `reservation` package: the member limit is part of reserving, and its
-better version is the same `LockingReservationService` with the member lock added.
+Lessons 4 and 5 share the `reservation` package: the member limit is part of reserving.
+`LockingReservationService` is lesson 4's better version and lesson 5's naive version;
+`MemberLockingReservationService` is the same code with the member locked before the count.
 
 ## 10. Demonstration order
 
@@ -551,7 +573,7 @@ better version is the same `LockingReservationService` with the member lock adde
 | 2 | Shelf map | first-level-cache, naive → projection | 20,301 → 1 entities; 2.7 → 1.3 MB; 138 → 51 ms |
 | 3 | Import | naive (5,000) → batched (5,000 and 20,000) | 21.5 s → 0.28 s for the same 5,000 rows; 15,001 → 3 statements |
 | 4 | Reservation | naive → pessimistic, overlap naive → overlap pessimistic | 50 promises → 1; the loser's copy stays free |
-| 5 | Member limit | naive → locked | 6 items → 3 |
+| 5 | Member limit | naive → locked | 6 items → 4 (limit 5) |
 
 The catalogue goes first because it introduces lazy loading and the persistence context, which
 the import and the shelf map build on. The numbers in this table are expected values from the

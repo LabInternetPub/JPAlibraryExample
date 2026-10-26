@@ -96,3 +96,15 @@ POST {{host}}/better/reservations
 Content-Type: application/json
 
 {"memberEmail": "member02@library.test", "branch": "North", "barcodes": ["N0010", "N0011"]}
+
+### Member limit — copies locked, count unlocked: two tabs of one member end with 6 items (limit 5)
+POST {{host}}/scenarios/member-limit-naive
+
+### Member limit — member row locked first: one tab reserves, the other gets 409
+POST {{host}}/scenarios/member-limit-locked
+
+### Reserve with the member locked. Run after member-limit-locked (member53 then has 4 items): 409 member-limit-exceeded
+POST {{host}}/better/reservations/member-locked
+Content-Type: application/json
+
+{"memberEmail": "member53@library.test", "branch": "North", "barcodes": ["N0025", "N0026", "N0027", "N0028"]}

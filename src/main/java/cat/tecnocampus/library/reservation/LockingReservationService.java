@@ -63,8 +63,10 @@ public class LockingReservationService {
         Member member = members.findById(memberId).orElseThrow(() -> new NotFoundException("Member", memberId));
         MemberLimit.check(reservations.countActiveItems(memberId, now), copyIds.size());
 
-        // Before the lock, not after: a thread that held the lock and waited here for the others
-        // would wait for threads that are waiting for its lock.
+        // After the count and before the lock. Before the lock, because a thread that held the lock
+        // and waited here for the others would wait for threads that are waiting for its lock. After
+        // the count, because that is where the member limit breaks: two requests of the same member
+        // both count, then both reserve (the member-limit lesson uses this service as its naive version).
         raceWindow.pause();
 
         // LOCK, then CHECK the locked rows: the other requests for these copies wait here.

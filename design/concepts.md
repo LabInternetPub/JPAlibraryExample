@@ -332,18 +332,19 @@ List<Copy> lockCopies(@Param("ids") Collection<UUID> ids);
 ### 4.5 Per-member limit (write skew)
 
 **Scenario.** A member can have at most 5 active items (loans plus live reservations). The
-concurrency scenario simulates two browser tabs of the same member. Each tab reserves 3 copies,
-and the copies are different, so the limit must not end at 6. A member's **first** request must
-be accepted.
+member starts with 2 open loans. The concurrency scenario simulates two browser tabs of that
+member; each tab reserves 2 copies, and the copies are different, so the member must not end
+with 6. A member's **first** request must be accepted.
 
-**Naive (`NaiveReservationService` with the limit check).**
+**Naive (`LockingReservationService`, the better version of 4.4).** The copies are locked, but the
+limit is checked without a lock:
 
-1. Count the member's active loans and reservations.
-2. If `count + requested <= 5`, continue with the reservation.
+1. Count the member's open loans and live reservations.
+2. If `count + requested <= 5`, lock the copies and reserve them.
 
 **What the scenario shows, and why.**
 
-- Both tabs read 0, both pass the check and both commit, so the member ends with 6 items.
+- Both tabs count 2, both pass the check and both commit, so the member ends with 6 items.
 - **Write skew, not a lost update.** Both transactions read the same *set* of rows but write
   *different* rows. Locking the copies, as in 4.4, does not help here: the copies are disjoint, so
   no transaction ever waits for the other.
@@ -354,13 +355,13 @@ be accepted.
     skew.
   - A unique constraint cannot check a sum.
 
-**Better (`LockingReservationService`): turn the limit into a conflict on one row.**
+**Better (`MemberLockingReservationService`): turn the limit into a conflict on one row.**
 
-1. Lock the **`Member`** row (`entityManager.find(Member.class, id, PESSIMISTIC_WRITE)`) before
+1. Lock the **`Member`** row (`MemberRepository.lockById`, `@Lock(PESSIMISTIC_WRITE)`) before
    counting.
-2. Count, check and reserve in the same transaction.
+2. Count, check, lock the copies and reserve, all in the same transaction.
 
-The second tab waits for the first tab to commit, then counts 3 and is rejected.
+The second tab waits for the first tab to commit, then counts 4 and is rejected (4 + 2 > 5).
 
 - **Lock order:** take the member lock before the copy locks, everywhere.
 - **Rollback:** if the copies are then unavailable, the exception rolls back the whole request.

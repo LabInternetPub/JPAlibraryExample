@@ -1,8 +1,14 @@
 package cat.tecnocampus.library.scenario;
 
+import cat.tecnocampus.library.domain.Copy;
+import cat.tecnocampus.library.domain.Loan;
+import cat.tecnocampus.library.domain.Member;
 import jakarta.persistence.EntityManager;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
+
+import java.time.Instant;
+import java.util.List;
 
 /**
  * Puts the data a scenario uses back to a known state, so the naive and the better scenario run
@@ -46,5 +52,17 @@ public class DemoReset {
                         where c.branch.name = 'North'
                         """)
                 .executeUpdate();
+    }
+
+    /** Lends copies of a branch to a member, as the starting point of a scenario. */
+    @Transactional
+    public void lend(String memberEmail, String branch, List<String> barcodes) {
+        Member member = entityManager.createQuery("select m from Member m where m.email = :email", Member.class)
+                .setParameter("email", memberEmail).getSingleResult();
+        List<Copy> copies = entityManager.createQuery(
+                        "select c from Copy c where c.branch.name = :branch and c.barcode in :barcodes", Copy.class)
+                .setParameter("branch", branch).setParameter("barcodes", barcodes).getResultList();
+        Instant now = Instant.now();
+        copies.forEach(copy -> entityManager.persist(new Loan(member, copy, now)));
     }
 }
