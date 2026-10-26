@@ -187,6 +187,9 @@ flowchart LR
 **Learned:** write-side N+1, `merge` vs `persist`, auto-flush, dirty checking, persistence-context
 growth, JDBC batching, `getReferenceById`, atomic import.
 
+The detailed explanation of both versions (batches of one, quadratic growth, dirty checking, the
+tricks of the batched version) is in [import.md](import.md).
+
 **Endpoints:** `POST /naive/branches/{name}/copies/import` and
 `POST /better/branches/{name}/copies/import` (multipart field `file`). Response: rows, created,
 updated, unchanged. A bad file is a `400` problem+json with the `line`.
