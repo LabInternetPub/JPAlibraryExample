@@ -31,12 +31,12 @@ class DomainMappingTest {
     void theWholeGraphIsStoredAndAssociationsAreLoadedLazily() {
         // Given
         Author author = new Author("Mercè Rodoreda", "Catalan");
-        Subject novel = new Subject("Novel");
-        Book book = new Book("978-84-00-00001-1", "La plaça del Diamant", 1962, author);
+        Subject novel = new Subject("Test subject");
+        Book book = new Book("978-TEST-0001", "La plaça del Diamant", 1962, author);
         book.addSubject(novel);
-        Branch branch = new Branch("North", "Mataró");
+        Branch branch = new Branch("Test branch", "Mataró");
         Copy copy = new Copy(branch, book, "N000001", 1, "1-A", Condition.GOOD);
-        Member member = new Member("Ana", "ana@example.org");
+        Member member = new Member("Test member", "test-member@example.org");
         Reservation reservation = new Reservation(member, List.of(copy.getId()), NOW);
         reservation.reserve(List.of(copy), NOW);
         List.of(author, novel, book, branch, copy, member, reservation).forEach(entityManager::persist);
@@ -57,7 +57,7 @@ class DomainMappingTest {
         Book loadedBook = loaded.getBook();
         assertThat(util.isLoaded(loadedBook, "author")).isFalse();
         assertThat(util.isLoaded(loadedBook, "subjects")).isFalse();
-        assertThat(loadedBook.getSubjects()).extracting(Subject::getName).containsExactly("Novel");
+        assertThat(loadedBook.getSubjects()).extracting(Subject::getName).containsExactly("Test subject");
 
         Reservation loadedReservation = entityManager.find(Reservation.class, reservation.getId());
         assertThat(loadedReservation.getCopyIds()).containsExactly(copy.getId());
@@ -67,8 +67,8 @@ class DomainMappingTest {
     void aBarcodeIsUniqueWithinABranch() {
         // Given
         Author author = new Author("Mercè Rodoreda", "Catalan");
-        Book book = new Book("978-84-00-00001-1", "La plaça del Diamant", 1962, author);
-        Branch branch = new Branch("North", "Mataró");
+        Book book = new Book("978-TEST-0001", "La plaça del Diamant", 1962, author);
+        Branch branch = new Branch("Test branch", "Mataró");
         List.of(author, book, branch).forEach(entityManager::persist);
         entityManager.persist(new Copy(branch, book, "N000001", 1, "1-A", Condition.GOOD));
 

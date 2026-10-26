@@ -40,7 +40,7 @@ same measurements so the numbers can be compared.
 - **`data.sql`:** loads the base data:
   - branches, members and authors;
   - 300 books with **distinct authors**, because a single shared author would let the first-level
-    cache hide the N+1;
+    cache hide the N+1, plus 20 books by one author to show exactly that effect;
   - one branch with 20,000 copies, generated in SQL so the file stays small;
   - one bestseller with a single available copy.
 - **Import file:** the 20,000-row CSV for the bulk import is a resource file. It is not loaded by
@@ -194,7 +194,7 @@ an `UPDATE` only for the rows that changed.
 **Scenario.** `GET /books` returns every book with its title, the author's name and nationality,
 and its subjects.
 
-**Naive (`NaiveCatalogueService`).** `findAll()`. Then, for each book, `book.getAuthor().getName()`
+**Naive (`NaiveCatalogueService`).** Load all the books. Then, for each book, `book.getAuthor().getName()`
 and `book.getSubjects()`.
 
 **What the numbers show, and why.**
@@ -204,7 +204,7 @@ and `book.getSubjects()`.
   it, with its own query, so the listing costs 1 + N + N statements.
 - **The first-level cache hides part of the N+1.** With one shared author, the author query runs
   only once. The data uses distinct authors for that reason. To show the effect, run the scenario
-  once against a set of books that share an author.
+  once on the 20 books of `Prolific Author`.
 - **`EAGER` is not the fix.** It moves the N+1 somewhere else instead of removing it, and it then
   applies to every use of the entity.
 

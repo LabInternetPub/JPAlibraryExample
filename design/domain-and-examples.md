@@ -128,18 +128,23 @@ The rules live in the entities, never in the services. The services orchestrate 
 
 ## 2. Data loaded at startup
 
-Hibernate creates the schema. `data.sql` runs after it and loads:
+Hibernate drops and creates the schema at every start (`ddl-auto=create`). `data.sql` runs after
+it (`defer-datasource-initialization=true`) and generates the rows with `generate_series`. Every
+start begins from the same data; ids are random UUIDs, so scenarios find rows by business key
+(branch name, ISBN, barcode, member email). The counts below are checked by
+`ExampleDataAndQueriesTest`.
 
 | Data | Volume | Used in |
 | --- | --- | --- |
 | Branches | `Central` (20,000 copies), `North` (small, for reservations), `Annex` (empty, target of the import) | All |
-| Authors | 300, all distinct | Catalogue |
+| Authors | 302: `Author 001`–`Author 300` (one per book), `Prolific Author` (20 books), `Bestselling Author` (the bestseller) | Catalogue |
 | Subjects | 20 | Catalogue |
-| Books | 300, each with one author and 2–4 subjects | Catalogue, Shelf map |
-| Copies in `Central` | 20,000, spread over the 300 books and 5 floors, generated in SQL | Shelf map |
-| Statuses in `Central` | Mostly `AVAILABLE`; about 1,000 `ON_LOAN`, 500 `RESERVED` (100 of them already expired), 50 `WITHDRAWN` | Shelf map |
-| Members | 60 | Reservation, Member limit |
-| Copies in `North` | The **bestseller** with a single copy, and a group of ordinary copies for the multi-copy and member-limit scenarios | Reservation, Member limit |
+| Books | 321: `Title 001`–`Title 300` (ISBN `978-84-000001`…), `Prolific Title 301`–`320`, and `The Last Copy` (ISBN `978-84-999999`); each with 2–4 subjects (963 links) | Catalogue, Shelf map |
+| Copies in `Central` | 20,000 (`C000001`–`C020000`) over books 1–300; 5 floors × 40 shelves × 100 copies | Shelf map |
+| Statuses in `Central` | 18,450 `AVAILABLE`, 1,000 `ON_LOAN` (with their loans), 500 `RESERVED` (with their reservations; 100 already expired, so the map shows 18,550 available), 50 `WITHDRAWN` | Shelf map |
+| Members | 60 scenario members (`member01@library.test`…) with no items; 500 readers (`reader001@library.test`…) who own Central's loans and reservations, at most 3 items each | Reservation, Member limit |
+| Copies in `North` | The **bestseller** (`N-BEST`, a single copy) and 30 ordinary available copies (`N0001`–`N0030`) | Reservation, Member limit |
+| Copies in `Annex` | None | Import |
 
 Resource files:
 
@@ -188,7 +193,7 @@ flowchart TB
     subgraph Naive["NaiveCopyImportService"]
         direction TB
         n1[for each row] --> n2[findBookByIsbn]
-        n2 --> n3[findByBranchAndBarcode]
+        n2 --> n3[findByBranchIdAndBarcode]
         n3 --> n4[new Copy or copy.reimport]
         n4 --> n5[repository.save]
         n5 --> n1
@@ -209,7 +214,7 @@ flowchart TB
 | `CopyCsvParser` (shared) | Validation before writing; a bad row anywhere → nothing imported |
 | `NaiveCopyImportService.importFile` | The natural loop: the per-row lookups are the write-side N+1 |
 | `copyRepository.save(copy)` with an assigned UUID | `save()` calls `merge()`, which first `SELECT`s by id |
-| `findByBranchAndBarcode` inside the loop | Flush mode `AUTO`: every query flushes the pending insert, so batches hold one row, and every flush dirty-checks all managed copies (O(n²)) |
+| `findByBranchIdAndBarcode` inside the loop | Flush mode `AUTO`: every query flushes the pending insert, so batches hold one row, and every flush dirty-checks all managed copies (O(n²)) |
 | One `@Transactional` around the loop | Atomicity, and a persistence context that keeps 20,000 copies |
 | `bookRepository.findIsbnIndex()` (JPQL → `record IsbnRef(String isbn, UUID id)`) | One scalar query instead of one per row |
 | `entityManager.getReferenceById(Book, id)` | A proxy for the association without loading the book |
@@ -235,22 +240,22 @@ error file imports nothing (Testcontainers).
 Response: per book, `isbn`, `title`, `authorName`, `authorNationality`, `subjects`.
 
 **Scenarios:** `catalogue-naive`, `catalogue-join-fetch`, `catalogue-projection`. Each one lists
-the 300 books ten times after three warm-ups.
+the 321 books ten times after three warm-ups.
 
 ```mermaid
 sequenceDiagram
     participant S as NaiveCatalogueService
     participant H as Hibernate
     participant DB as PostgreSQL
-    S->>H: bookRepository.findAll()
+    S->>H: bookRepository.findAllOrderedByTitle()
     H->>DB: select books (1)
-    loop for each of the 300 books
+    loop for each of the 321 books
         S->>H: book.getAuthor().getName()
         H->>DB: select author by id (1 per distinct author)
         S->>H: book.getSubjects()
         H->>DB: select subjects of book (1 per book)
     end
-    Note over S,DB: 1 + 300 + 300 statements
+    Note over S,DB: 1 + 302 authors + 321 subject lists = 624 statements
 ```
 
 | Piece of code | Concept learned |
@@ -258,7 +263,7 @@ sequenceDiagram
 | `@ManyToOne(fetch = LAZY) Author author` | Proxies; the default `EAGER` would load authors anyway |
 | `@ManyToMany List<Subject> subjects` (lazy by default) | An uninitialized collection loads when first touched |
 | `NaiveCatalogueService.list` walking `getAuthor()` and `getSubjects()` | The N+1, visible in the SQL log and in the count |
-| Extra `.http` request against books sharing one author | The first-level cache answers repeated author lookups |
+| `findByAuthorNameOrderedByTitle("Prolific Author")`: 20 books, 2 statements | The first-level cache answers repeated author lookups |
 | `@Transactional(readOnly = true)` on every catalogue service | Flush mode manual, no snapshots |
 | `BookRepository.findAllWithAuthorAndSubjects()` (`select distinct b … join fetch b.author left join fetch b.subjects`) | One statement; managed entities still built |
 | `BookRepository.findCatalogueRows()` (`select new BookRow(b.isbn, b.title, a.name, a.nationality, s.name) …`) + grouping in the service | No managed entities at all; one row per book and subject |
@@ -266,7 +271,7 @@ sequenceDiagram
 
 **Report:** statements, entity loads, collection fetches and median time for the three variants.
 
-**Example tests:** statement-count test that the two better variants use one statement for 300
+**Example tests:** statement-count test that the two better variants use one statement for 321
 books; a test showing `LazyInitializationException` when an entity leaves the transaction.
 
 ## 6. Lesson 3: The shelf map of a branch
@@ -297,12 +302,12 @@ member id or deadline.
 
 | Piece of code | Concept learned |
 | --- | --- |
-| `NaiveShelfMapService`: `copyRepository.findByBranch(branch)`, then `copy.getBook()` for each copy | Few statements (300 books loaded once each), but 20,300 managed entities |
+| `NaiveShelfMapService`: `copyRepository.findByBranchOrdered(branch)`, then `copy.getBook()` for each copy | Few statements (300 books loaded once each), but 20,300 managed entities |
 | `copy.visibleStatusAt(now)` in the naive mapper | Logical expiry as a domain rule |
 | `CopyItem` DTO without member or deadline | Mapping to a DTO is the first privacy defence |
 | `@Transactional(readOnly = true)` | Cheaper entities, still entities |
 | Response bytes in the report | 20,000 repeated field names |
-| `CopyRepository.projectShelfMap(branch, now)`: JPQL `select new ShelfRow(…, case when c.status = RESERVED and c.reservedUntil <= :now then AVAILABLE else c.status end)` joined with `Book`, ordered by floor and shelf | Scalars only, one query, expiry in the query |
+| `CopyRepository.projectShelfMap(branch, now)`: JPQL `select new ShelfRow(…, case when c.status = RESERVED and c.reservedUntil <= :now then 'AVAILABLE' else cast(c.status as String) end)` joined with `Book`, ordered by floor and shelf | Scalars only, one query, expiry in the query |
 | `ShelfRow` record without member or deadline fields | Privacy by construction: nothing to leak |
 | `ShelfMapResponse.from(rows)` | Grouping and the compact format |
 | Extra `.http` request: two `findById` of the same copy in one transaction (`GET /demo/first-level-cache/{copyId}`) | First-level cache: one statement, the same object |
@@ -448,7 +453,7 @@ better version is the same `LockingReservationService` with the member lock adde
 
 | Order | Lesson | Scenarios | Main number to show |
 | --- | --- | --- | --- |
-| 1 | Catalogue | naive → join-fetch → projection | 601 → 1 → 1 statements |
+| 1 | Catalogue | naive → join-fetch → projection | 624 → 1 → 1 statements |
 | 2 | Shelf map | naive → projection | entity loads and response bytes |
 | 3 | Import | naive → batched | time and statements, first import and re-import |
 | 4 | Reservation | naive → pessimistic, partial naive → partial pessimistic | 50 promises → 1 |
