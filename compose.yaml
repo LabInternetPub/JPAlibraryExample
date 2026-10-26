@@ -1,0 +1,10 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: library
+      POSTGRES_USER: library
+      POSTGRES_PASSWORD: library
+    # Host port 5433, so it can run next to another project that uses 5432.
+    ports:
+      - "5433:5432"
