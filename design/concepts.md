@@ -69,18 +69,19 @@ the size of the shelf map, or the absence of member data in it).
 | --- | --- | --- |
 | Bulk import | `import-naive` | `import-batched` |
 | Catalogue | `catalogue-naive` | `catalogue-join-fetch`, `catalogue-projection` |
-| Shelf map | `shelf-map-naive` | `shelf-map-projection` |
+| Shelf map | `shelf-map-naive`, `first-level-cache` | `shelf-map-projection` |
 | Reservation | `reservation-naive` | `reservation-pessimistic` |
 | Member limit | `member-limit-naive` | `member-limit-locked` |
 
 ### 2.3 What a scenario reports
 
-- **SQL statements**, read from Hibernate `Statistics` (`hibernate.generate_statistics=true`):
-  - prepared statements and entity loads;
-  - collection fetches;
-  - and, for the import, the number of JDBC batches.
+- **What Hibernate sent to the database:**
+  - single JDBC statements and JDBC batches, counted by a Hibernate `SessionEventListener`
+    (Hibernate `Statistics` cannot tell a batch of 500 inserts from 500 single inserts);
+  - entities loaded, inserted and updated, and lazy collections fetched, read from Hibernate
+    `Statistics` (`hibernate.generate_statistics=true`).
 
-  Statistics are cleared at the start of the measurement. The SQL log is left on, so the class
+  The counters are cleared at the start of the measurement. The SQL log is left on, so the class
   can read the statements while the scenario reports the count.
 - **Time:** a few warm-up calls, then several samples. The report gives the median, not a single
   run.
@@ -385,7 +386,7 @@ The second tab waits for the first tab to commit, then counts 3 and is rejected.
   - the `Scenario` interface;
   - the `CommandLineRunner`;
   - `ScenarioController`;
-  - the measurement helper (Hibernate `Statistics`, timer, heap);
+  - the measurement helper (`SessionEventListener` and Hibernate `Statistics`, timer, heap);
   - the `RaceWindow` bean.
 - **Repository root:**
   - `scenarios.http`;

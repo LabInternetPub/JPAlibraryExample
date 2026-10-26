@@ -1,0 +1,11 @@
+### Scenarios for the class, in lesson order.
+### Start the application first: ./mvnw spring-boot:run   (PostgreSQL starts from compose.yaml)
+### Each request runs one scenario and returns its report as JSON; the SQL log shows the statements.
+
+@host = http://localhost:8081
+
+### List the scenarios
+GET {{host}}/scenarios
+
+### Shelf map — the persistence context (first-level cache)
+POST {{host}}/scenarios/first-level-cache

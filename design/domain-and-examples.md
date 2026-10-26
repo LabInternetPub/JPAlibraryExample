@@ -171,7 +171,9 @@ flowchart LR
 | `Scenario` interface (`name()`, `run()`) | One demonstration, one report | Repeatable measurement |
 | `ScenarioRunner` (`CommandLineRunner`) | Runs the scenarios given in `--scenario` and stops | Spring Boot startup hooks |
 | `ScenarioController` | `POST /scenarios/{name}` returns the report | Driving a demo from `.http` |
-| `Measurement` | Clears and reads Hibernate `Statistics`, times samples, samples heap | Counting statements, warm-up, median, noisy memory |
+| `JdbcExecutionCounter` (Hibernate `SessionEventListener`, registered with `hibernate.session.events.auto`) | Counts single JDBC statements and JDBC batches | A batch is one round trip; `Statistics` cannot tell batches apart |
+| `Measurement` | `sql(action)`: clears and reads the counters and Hibernate `Statistics`; `time(warmups, samples, action)`: median, min, max; `heap(action)`: peak heap growth sampled every 2 ms | Counting statements, warm-up, median, noisy memory |
+| `SqlCounts`, `Measured`, `Timing` (records) | What was measured, ready to put in a report | |
 | `ScenarioReport` (record) | Statements, entity loads, collection fetches, batches, median time, heap, bytes, outcome counts | Comparing naive and better with the same numbers |
 | `RaceWindow` | No-op in normal use; a `CyclicBarrier` in concurrency scenarios | Forcing a possible interleaving |
 | `ConcurrentRun` helper | 50 tasks on an `ExecutorService`, released by a `CountDownLatch` | Starting requests at the same instant |
@@ -296,7 +298,8 @@ computed at read time, privacy by construction, first-level cache, why not a sec
 }
 ```
 
-**Scenarios:** `shelf-map-naive` and `shelf-map-projection`, on `Central` (20,000 copies). Each one
+**Scenarios:** `first-level-cache` (the concept the lesson starts from), then `shelf-map-naive` and
+`shelf-map-projection`, on `Central` (20,000 copies). Each of the last two
 also checks that the response has 100 expired reservations shown as available and contains no
 member id or deadline.
 
@@ -310,7 +313,7 @@ member id or deadline.
 | `CopyRepository.projectShelfMap(branch, now)`: JPQL `select new ShelfRow(…, case when c.status = RESERVED and c.reservedUntil <= :now then 'AVAILABLE' else cast(c.status as String) end)` joined with `Book`, ordered by floor and shelf | Scalars only, one query, expiry in the query |
 | `ShelfRow` record without member or deadline fields | Privacy by construction: nothing to leak |
 | `ShelfMapResponse.from(rows)` | Grouping and the compact format |
-| Extra `.http` request: two `findById` of the same copy in one transaction (`GET /demo/first-level-cache/{copyId}`) | First-level cache: one statement, the same object |
+| `FirstLevelCacheScenario` (`first-level-cache`): two `findById` of the same copy in one `TransactionTemplate`, then in two | First-level cache: 1 statement and the same object in one transaction; 2 statements and two objects in two |
 
 **Report:** statements, entity loads, median time, heap and response bytes for both versions.
 
@@ -442,8 +445,10 @@ cat.tecnocampus.library
 ├── shelfmap          NaiveShelfMapService, ProjectedShelfMapService, ShelfMapController
 ├── reservation       NaiveReservationService, LockingReservationService, ReservationController
 ├── web               ProblemDetailsHandler
-└── scenario          Scenario, ScenarioRunner, ScenarioController, Measurement, ScenarioReport,
-                      RaceWindow, ConcurrentRun, DemoReset, one class per scenario
+└── scenario          Scenario, ScenarioRegistry, ScenarioRunner, ScenarioController, ScenarioReport,
+                      Measurement, JdbcExecutionCounter, SqlCounts, Measured, Timing,
+                      RaceWindow, ConcurrentRun, DemoReset
+                      (each scenario class lives in the package of its lesson)
 ```
 
 Lessons 4 and 5 share the `reservation` package: the member limit is part of reserving, and its
