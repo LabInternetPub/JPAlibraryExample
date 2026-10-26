@@ -109,7 +109,10 @@ class CatalogueScenarios {
                     .sql("one call", measured.sql())
                     .result("time", timing.toString());
             if (reference != null) {
-                report.result("same response as the naive version", measured.value().equals(reference.get()));
+                // The naive reference sends hundreds of statements; with the log on they would be read as
+                // part of this scenario.
+                List<BookSummary> expected = measurement.withoutSqlLog(reference);
+                report.result("same response as the naive version", measured.value().equals(expected));
             }
             addToReport(report);
             return report.build();
