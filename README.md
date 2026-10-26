@@ -16,8 +16,8 @@ The design and the concepts are explained in [`design/concepts.md`](design/conce
 - To send the requests in `scenarios.http`: IntelliJ IDEA's HTTP client, or the VS Code
   REST Client extension.
 
-The application listens on port **8081**, and PostgreSQL on **5433**, so the example can run
-next to another project that uses the default ports.
+The application listens on port **8080**. PostgreSQL is mapped to port **5433**, so it does not
+clash with another PostgreSQL on the default port 5432.
 
 ## Start the application
 
@@ -145,8 +145,9 @@ transactions, privacy of responses, and the endpoints. They are not the demonstr
 
 ## Troubleshooting
 
-- **Port 8081 or 5433 is in use:** stop the other application, or change `server.port` in
-  `application.properties` or the port mapping in `compose.yaml`.
+- **Port 8080 or 5433 is in use:** stop the other application (for example another Spring Boot
+  project on 8080), or change `server.port` in `application.properties` (and `@host` in
+  `scenarios.http`) or the port mapping in `compose.yaml`.
 - **The application cannot start PostgreSQL:** check that Docker is running. `docker compose ps`
   shows the container.
 - **A concurrency scenario logs "Race window broken":** some thread never reached the barrier,

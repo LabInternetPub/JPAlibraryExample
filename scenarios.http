@@ -2,7 +2,7 @@
 ### Start the application first: ./mvnw spring-boot:run   (PostgreSQL starts from compose.yaml)
 ### Each request runs one scenario and returns its report as JSON; the SQL log shows the statements.
 
-@host = http://localhost:8081
+@host = http://localhost:8080
 
 ### List the scenarios
 GET {{host}}/scenarios
