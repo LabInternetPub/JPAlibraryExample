@@ -12,6 +12,7 @@ import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryMXBean;
 import java.util.Arrays;
 import java.util.Locale;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Supplier;
 
 /**
@@ -52,13 +53,34 @@ public class Measurement {
      * the time spent writing it would be measured too.
      */
     public Timing time(int warmups, int samples, Runnable action) {
+        return withoutSqlLog(() -> timeSamples(warmups, samples, action));
+    }
+
+    /** Runs the action with the SQL log off: for actions that send thousands of statements. */
+    public <T> T withoutSqlLog(Supplier<T> action) {
         LoggerConfiguration sqlLog = logging.getLoggerConfiguration(SQL_LOGGER);
         LogLevel previous = sqlLog == null ? null : sqlLog.getConfiguredLevel();
         logging.setLogLevel(SQL_LOGGER, LogLevel.OFF);
         try {
-            return timeSamples(warmups, samples, action);
+            return action.get();
         } finally {
             logging.setLogLevel(SQL_LOGGER, previous);
+        }
+    }
+
+    /** One run of a long action: SQL counts, wall-clock time and peak heap growth together. */
+    public <T> SingleRun<T> once(Supplier<T> action) {
+        AtomicReference<Measured<T>> measured = new AtomicReference<>();
+        long start = System.nanoTime();
+        HeapUse heap = heap(() -> measured.set(sql(action)));
+        double ms = (System.nanoTime() - start) / 1_000_000.0;
+        return new SingleRun<>(measured.get().value(), measured.get().sql(), ms, heap);
+    }
+
+    public record SingleRun<T>(T value, SqlCounts sql, double ms, HeapUse heap) {
+
+        public String time() {
+            return String.format(Locale.ROOT, "%.0f ms", ms);
         }
     }
 

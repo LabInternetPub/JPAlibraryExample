@@ -30,4 +30,8 @@ public interface ReservationRepository extends JpaRepository<Reservation, UUID> 
     /** Every reservation id: the shelf-map scenarios check that none of them appears in a response. */
     @Query("select r.id from Reservation r")
     List<UUID> findAllIds();
+
+    /** How many reservations claim this copy. More than one live reservation for a copy is a broken promise. */
+    @Query("select count(r) from Reservation r join r.copyIds c where c = :copy")
+    long countByCopy(@Param("copy") UUID copyId);
 }

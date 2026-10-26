@@ -79,6 +79,11 @@
             <plugin>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-maven-plugin</artifactId>
+                <configuration>
+                    <!-- spring-boot:run limits the JIT to its first tier by default (faster start-up,
+                         slower code). The scenarios measure time, so they run with the normal JIT. -->
+                    <optimizedLaunch>false</optimizedLaunch>
+                </configuration>
             </plugin>
         </plugins>
     </build>

@@ -45,3 +45,54 @@ GET {{host}}/better/branches/Central/shelf-map
 
 ### Unknown branch: 404 problem+json
 GET {{host}}/better/branches/Nowhere/shelf-map
+
+### Import — naive: 5,000 rows imported twice (about 40 s; the cost grows with the square of the rows)
+POST {{host}}/scenarios/import-naive
+
+### Import — batched: the same 5,000 rows, then 20,000
+POST {{host}}/scenarios/import-batched
+
+### Import endpoints: upload a file to Annex (re-uploading the same file updates, never duplicates)
+POST {{host}}/better/branches/Annex/copies/import
+Content-Type: multipart/form-data; boundary=boundary
+
+--boundary
+Content-Disposition: form-data; name="file"; filename="annex-20000.csv"
+
+< ./src/main/resources/import/annex-20000.csv
+--boundary--
+
+### An unknown ISBN on the last row: 400 with the line, and nothing imported.
+### The naive version writes 4,999 copies before it finds it; the rollback undoes them.
+POST {{host}}/naive/branches/Annex/copies/import
+Content-Type: multipart/form-data; boundary=boundary
+
+--boundary
+Content-Disposition: form-data; name="file"; filename="annex-5000-error-last-row.csv"
+
+< ./src/main/resources/import/annex-5000-error-last-row.csv
+--boundary--
+
+### Reservation — naive: fifty members, one copy, all fifty told 201
+POST {{host}}/scenarios/reservation-naive
+
+### Reservation — pessimistic lock: one 201, forty-nine 409
+POST {{host}}/scenarios/reservation-pessimistic
+
+### Reservation — two overlapping requests, naive: the shared copy promised twice
+POST {{host}}/scenarios/reservation-overlap-naive
+
+### Reservation — two overlapping requests, with locks: the loser leaves no trace
+POST {{host}}/scenarios/reservation-overlap-pessimistic
+
+### Reserve a copy (business keys: ids change at every start). Run it twice: 201, then 409.
+POST {{host}}/better/reservations
+Content-Type: application/json
+
+{"memberEmail": "member01@library.test", "branch": "North", "barcodes": ["N0010"]}
+
+###
+POST {{host}}/better/reservations
+Content-Type: application/json
+
+{"memberEmail": "member02@library.test", "branch": "North", "barcodes": ["N0010", "N0011"]}

@@ -65,4 +65,10 @@ public interface CopyRepository extends JpaRepository<Copy, UUID> {
     @QueryHints(@QueryHint(name = "jakarta.persistence.lock.timeout", value = "5000"))
     @Query("select c from Copy c where c.id in :ids order by c.id")
     List<Copy> lockCopies(@Param("ids") Collection<UUID> ids);
+
+    /** Reservation requests name copies by branch and barcode: ids change at every start of the example. */
+    @Query("select new cat.tecnocampus.library.persistence.BarcodeRef(c.barcode, c.id) from Copy c "
+            + "where c.branch.name = :branch and c.barcode in :barcodes")
+    List<BarcodeRef> findIdsByBranchAndBarcodes(@Param("branch") String branch,
+                                                @Param("barcodes") Collection<String> barcodes);
 }

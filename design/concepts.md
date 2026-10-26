@@ -43,8 +43,9 @@ same measurements so the numbers can be compared.
     cache hide the N+1, plus 20 books by one author to show exactly that effect;
   - one branch with 20,000 copies, generated in SQL so the file stays small;
   - one bestseller with a single available copy.
-- **Import file:** the 20,000-row CSV for the bulk import is a resource file. It is not loaded by
-  SQL, because importing it is the lesson.
+- **Import files:** the 20,000-row CSV for the bulk import, its first 5,000 rows, and a 5,000-row
+  file with an unknown ISBN on the last row, are resource files. They are not loaded by SQL,
+  because importing them is the lesson.
 - **Reset before each scenario:** every scenario first restores the data it uses to a known state
   (delete what earlier runs created). That way, the naive and the better scenario run on identical
   data and can be run in any order, any number of times.
@@ -70,7 +71,7 @@ the size of the shelf map, or the absence of member data in it).
 | Bulk import | `import-naive` | `import-batched` |
 | Catalogue | `catalogue-naive` | `catalogue-join-fetch`, `catalogue-projection` |
 | Shelf map | `shelf-map-naive`, `first-level-cache` | `shelf-map-projection` |
-| Reservation | `reservation-naive` | `reservation-pessimistic` |
+| Reservation | `reservation-naive`, `reservation-overlap-naive` | `reservation-pessimistic`, `reservation-overlap-pessimistic` |
 | Member limit | `member-limit-naive` | `member-limit-locked` |
 
 ### 2.3 What a scenario reports
@@ -143,8 +144,10 @@ happens in real traffic.
 
 **Scenario.** Import a 20,000-row CSV into a branch. Two copies of the same branch cannot share a
 barcode. Importing the same file again updates the copies instead of duplicating them, and keeps
-their ids. A bad row anywhere means nothing is imported. Both scenarios import the file twice: a
-first import and a re-import.
+their ids. A bad row anywhere means nothing is imported. Both scenarios import a file twice: a
+first import and a re-import. The naive scenario imports 5,000 rows, because its cost grows with
+the square of the rows (20,000 took about seven minutes); the batched scenario imports the same
+5,000 rows and then the full 20,000.
 
 **Naive (`NaiveCopyImportService`).** For each row:
 
@@ -310,8 +313,9 @@ List<Copy> lockCopies(@Param("ids") Collection<UUID> ids);
 2. **Check the copies that the locked query returned.** If the copies were already loaded without a
    lock in the same transaction, the locked query returns those same managed instances, with their
    old state.
-3. **Throw, do not return.** Throwing rolls back a partial success. The three-copy scenario shows
-   that the two free copies stay available.
+3. **Throw, do not return.** Throwing rolls back a partial success. The overlap scenario shows
+   it: of two simultaneous requests for `[N0001, N0002]` and `[N0003, N0002]`, the loser's other
+   copy stays available.
 4. **Fewer rows than requested is a rejection:** a copy that does not exist cannot be locked.
 5. **Always lock in the same order:** `order by c.id` in the query. Sorting the list in Java does
    not change the order of the locks. Without a fixed order, two requests that ask for the same

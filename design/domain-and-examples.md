@@ -150,7 +150,10 @@ Resource files:
 
 - `import/annex-20000.csv`: 20,000 rows `isbn,barcode,floor,shelf,condition`, all ISBNs from the
   loaded books.
-- `import/annex-error-last-row.csv`: 20,000 rows, the last one with an unknown condition.
+- `import/annex-5000.csv`: the first 5,000 rows of the same file (the naive import's size).
+- `import/annex-5000-error-last-row.csv`: the same 5,000 rows, the last one with an unknown ISBN.
+  The parser accepts it; only the database can tell, so the naive import writes 4,999 copies
+  before it fails and the rollback undoes them.
 
 ## 3. Scenario infrastructure
 
@@ -184,17 +187,21 @@ flowchart LR
 **Learned:** write-side N+1, `merge` vs `persist`, auto-flush, dirty checking, persistence-context
 growth, JDBC batching, `getReferenceById`, atomic import.
 
-**Endpoints:** `POST /naive/branches/{id}/copies/import` and `POST /better/branches/{id}/copies/import`
-(multipart CSV). Response: number of created and updated copies.
+**Endpoints:** `POST /naive/branches/{name}/copies/import` and
+`POST /better/branches/{name}/copies/import` (multipart field `file`). Response: rows, created,
+updated, unchanged. A bad file is a `400` problem+json with the `line`.
 
-**Scenarios:** `import-naive` and `import-batched`. Each one empties `Annex`, imports
-`annex-20000.csv`, then imports it again.
+**Scenarios:** `import-naive` imports `annex-5000.csv` into an emptied `Annex`, then imports it
+again. `import-batched` does the same with `annex-5000.csv` (direct comparison) and then with
+`annex-20000.csv`. The naive version is not run at 20,000 rows: its cost grows with the square of
+the rows, and a first try took about seven minutes. The SQL log is off during the imports.
 
 ```mermaid
 flowchart TB
     subgraph Naive["NaiveCopyImportService"]
         direction TB
-        n1[for each row] --> n2[findBookByIsbn]
+        n0[parse and validate whole file] --> n1[for each row]
+        n1 --> n2[findByIsbn]
         n2 --> n3[findByBranchIdAndBarcode]
         n3 --> n4[new Copy or copy.reimport]
         n4 --> n5[repository.save]
@@ -202,7 +209,7 @@ flowchart TB
     end
     subgraph Better["BatchedCopyImportService"]
         direction TB
-        b0[parse and validate whole file] --> b1["load isbn → bookId once"]
+        b0[parse and validate whole file] --> b1["load isbn → bookId once, check every ISBN"]
         b1 --> b2["load barcode → copyId once"]
         b2 --> b3[for each chunk of 500]
         b3 --> b4["persist new / reimport existing"]
@@ -211,27 +218,48 @@ flowchart TB
     end
 ```
 
+**Measured** (Apple M3 Pro, 18 GB, PostgreSQL 17 in Docker, normal JIT, one run; heap is a noisy
+sample):
+
+| Version and rows | Import | Time | JDBC statements | JDBC batches | Entities loaded | Peak heap growth |
+| --- | --- | --- | --- | --- | --- | --- |
+| Naive, 5,000 | first | 21,501 ms | 15,001 | 5,000 | 321 | 127 MB |
+| Naive, 5,000 | again | 17,007 ms | 10,001 | 0 | 5,321 | 92 MB |
+| Batched, 5,000 | first | 279 ms | 3 | 10 | 1 | 32 MB |
+| Batched, 5,000 | again | 202 ms | 13 | 0 | 5,001 | 24 MB |
+| Batched, 20,000 | first | 476 ms | 3 | 40 | 1 | 68 MB |
+| Batched, 20,000 | again | 378 ms | 43 | 0 | 20,001 | 60 MB |
+
+Reading the naive numbers:
+
+- 15,001 = the branch + 3 `SELECT`s per row (book, copy, and the one `merge()` sends).
+- The INSERTs do travel as JDBC batches, because `batch_size` is set, but each batch carries a
+  single INSERT: the next row's copy lookup auto-flushes it. 5,000 rows, 5,000 batches.
+- The re-import sends a third fewer statements and is barely faster: the time goes into the
+  dirty checking of every managed copy at every auto-flush, not into SQL.
+- In both versions the ids are the same after the re-import.
+
 | Piece of code | Concept learned |
 | --- | --- |
-| `CopyCsvParser` (shared) | Validation before writing; a bad row anywhere → nothing imported |
-| `NaiveCopyImportService.importFile` | The natural loop: the per-row lookups are the write-side N+1 |
+| `CopyCsvParser` (shared) | Validation before writing; a bad value anywhere → nothing imported |
+| `NaiveCopyImportService.importCopies` | The natural loop: the per-row lookups are the write-side N+1 |
 | `copyRepository.save(copy)` with an assigned UUID | `save()` calls `merge()`, which first `SELECT`s by id |
-| `findByBranchIdAndBarcode` inside the loop | Flush mode `AUTO`: every query flushes the pending insert, so batches hold one row, and every flush dirty-checks all managed copies (O(n²)) |
-| One `@Transactional` around the loop | Atomicity, and a persistence context that keeps 20,000 copies |
-| `bookRepository.findIsbnIndex()` (JPQL → `record IsbnRef(String isbn, UUID id)`) | One scalar query instead of one per row |
-| `entityManager.getReferenceById(Book, id)` | A proxy for the association without loading the book |
+| `findByBranchIdAndBarcode` inside the loop | Flush mode `AUTO`: every query flushes the pending insert, so batches carry one row, and every flush dirty-checks all managed copies (O(n²)) |
+| One `@Transactional` around the loop | Atomicity: an unknown ISBN on the last row rolls back the 4,999 copies already written |
+| `bookRepository.findIsbnIndex()` (JPQL → `record IsbnRef(String isbn, UUID id)`) | One scalar query instead of one per row; every ISBN checked before writing |
+| `entityManager.getReference(Book.class, id)` / `(Branch.class, id)` | A proxy for the association without loading the row |
 | `copyRepository.findBarcodeIndex(branch)` | Idempotency decided in memory, ids kept on re-import |
 | `entityManager.persist(copy)` | No `merge`, no hidden `SELECT` |
 | `copy.reimport(...)` + dirty checking | An `UPDATE` only when an attribute really changed |
-| `flush()` + `clear()` every 500 rows | Batches actually sent; at most 500 managed copies |
-| `application.yaml`: `jdbc.batch_size`, `order_inserts`, `order_updates`, `reWriteBatchedInserts` | Configuring JDBC batching through Hibernate |
+| `flush()` + `clear()` every 500 rows | Batches actually filled; at most 500 managed copies |
+| `application.properties`: `jdbc.batch_size=500`, `order_inserts`, `order_updates`, Hikari `reWriteBatchedInserts` | Configuring JDBC batching through Hibernate (both versions have it) |
+| `Measurement.withoutSqlLog`, `Measurement.once` | One long action measured once, without logging thousands of statements |
+| `DemoReset.emptyBranch("Annex")` (JPQL bulk delete) | Identical starting data for every run |
 
-**Report:** first import and re-import, each with time, statements, JDBC batches, entity loads and
-heap. Extra request in `scenarios.http`: import `annex-error-last-row.csv` and show that `Annex`
-is still empty.
-
-**Example tests:** parser rules (unit); re-import keeps ids and count (Testcontainers);
-error file imports nothing (Testcontainers).
+**Example tests** (`CopyCsvParserTest`, `CopyImportTest`): parser rules; both versions create,
+re-import with the same ids, and update only what changed; an unknown ISBN on the last row
+imports nothing; on 1,000 rows the naive version sends 3 statements and 1 batch per row, the
+batched one 3 statements and 2 batches; the endpoints over HTTP (`400` with the line).
 
 ## 5. Lesson 2: The catalogue (read-side N+1)
 
@@ -365,17 +393,38 @@ arrays all have 100 entries; leak test over HTTP for both endpoints (no reservat
 checking the locked rows, rollback by exception, fixed lock order, lock timeout.
 
 **Endpoints:** `POST /naive/reservations` and `POST /better/reservations`, body
-`{ "memberId": "…", "copyIds": ["…"] }`.
+`{ "memberEmail": "…", "branch": "North", "barcodes": ["…"] }` (business keys, because ids change at
+every start; `ReservationLookupService` turns them into ids). `GET /reservations/{id}`.
 
-- `201` with `Location`, `id`, `expiresAt`.
-- `409` problem+json with `unavailableCopies`.
+- `201` with `Location`, `id`, `expiresAt`, `copyIds`.
+- `409` problem+json, type `/problems/copies-unavailable`, with `unavailableCopies`.
+- `409` type `/problems/member-limit-exceeded` (more than 5 items; see lesson 5).
+- `503` type `/problems/lock-timeout` when the lock is not obtained within 5 s: not a business
+  rejection, the request can be retried.
 
-**Scenarios:**
+**Scenarios** (`ReservationScenarios`, North reset before each run with
+`DemoReset.resetNorthAndScenarioMembers`):
 
-- `reservation-naive` and `reservation-pessimistic`: 50 members, the bestseller's single copy,
-  released together, with the `RaceWindow` barrier between read and write.
-- `reservation-partial-naive` and `reservation-partial-pessimistic`: three copies requested, one
-  already reserved; after the `409`, are the other two still available?
+- `reservation-naive` and `reservation-pessimistic`: `member01`–`member50` ask for the
+  bestseller's single copy at the same instant, with the `RaceWindow` barrier.
+- `reservation-overlap-naive` and `reservation-overlap-pessimistic`: `member51` asks for
+  `[N0001, N0002]` and `member52` for `[N0003, N0002]` at the same instant. This is the case where
+  "a rejected request leaves no trace" shows: a single member asking for three copies with one
+  already taken is rejected cleanly by both versions, because both check before writing (that case
+  is a test, not a scenario).
+
+**Measured** (one run of the four scenarios, in this order, on a freshly started application):
+
+| Scenario | Outcomes | Reservations claiming the shared copy | Afterwards |
+| --- | --- | --- | --- |
+| `reservation-naive` | 50 × `201` | 50 | the copy row holds one of the 50 |
+| `reservation-pessimistic` | 1 × `201`, 49 × `409` | 1 | the copy row holds the winner |
+| `reservation-overlap-naive` | 2 × `201` | 2 (N0002) | N0001, N0002 and N0003 reserved |
+| `reservation-overlap-pessimistic` | 1 × `201`, 1 × `409` | 1 (N0002) | the loser's other copy is still `AVAILABLE` |
+
+The latencies (naive median 673 ms, pessimistic 45 ms) are not a speed comparison: the naive
+scenario ran first in a cold JVM, and its fifty dirty-checking `UPDATE`s also queue on the same row
+lock. Report them, do not draw conclusions from them.
 
 ```mermaid
 sequenceDiagram
@@ -415,13 +464,17 @@ sequenceDiagram
 | `locked.size() != copyIds.size()` | A missing copy cannot be locked, so it is a rejection |
 | `throw new CopiesUnavailableException(ids)` | Runtime exception → rollback; "leaves no trace" |
 | `Copy.reserve(...)` called on locked copies | The rule stays in the domain |
-| `ProblemDetailsHandler`: `CopiesUnavailableException` → `409`, `LockTimeoutException` → `409` | Clean rejections, never `500` |
+| `ProblemDetailsHandler`: `CopiesUnavailableException` → `409`, `PessimisticLockingFailureException` → `503` | Clean rejections, never `500`; a timeout is not a business rejection |
+| `raceWindow.pause()` before the locking read in `LockingReservationService` | A thread that held the lock and waited at the barrier would wait for threads waiting for its lock |
+| `spring.datasource.hikari.maximum-pool-size=60` | A transaction holds a connection: with the default 10, only 10 of the fifty requests run at once, and the barrier never fills |
 
-**Report:** successes, rejections, errors, reservation rows, reserved copies, median and p95 time.
-Partial scenario: the state of the two other copies.
-
-**Example tests:** fifty threads, one copy (Testcontainers): exactly one success; three copies with
-one taken: nothing left reserved; `Copy.reserve` refuses an unavailable copy (unit).
+**Example tests** (`ReservationTest`): both versions correct one member at a time; three copies
+with one taken: none reserved; naive, fifty members → fifty successes and fifty reservations
+claiming the copy; with locks, exactly one success, 49 `CopiesUnavailableException` and the copy
+row holding the winner; overlapping requests (naive: shared copy claimed twice; with locks: the
+loser's other copy available); the same two copies requested in opposite orders, ten rounds, never
+a deadlock; more than five copies → member limit; the endpoint over HTTP (`201` with `Location`,
+`409` with `unavailableCopies`, `404` for an unknown member).
 
 ## 8. Lesson 5: The per-member limit
 
@@ -496,8 +549,8 @@ better version is the same `LockingReservationService` with the member lock adde
 | --- | --- | --- | --- |
 | 1 | Catalogue | naive → join-fetch → projection | 624 → 1 → 1 statements; 87 → 3.8 → 2.4 ms |
 | 2 | Shelf map | first-level-cache, naive → projection | 20,301 → 1 entities; 2.7 → 1.3 MB; 138 → 51 ms |
-| 3 | Import | naive → batched | time and statements, first import and re-import |
-| 4 | Reservation | naive → pessimistic, partial naive → partial pessimistic | 50 promises → 1 |
+| 3 | Import | naive (5,000) → batched (5,000 and 20,000) | 21.5 s → 0.28 s for the same 5,000 rows; 15,001 → 3 statements |
+| 4 | Reservation | naive → pessimistic, overlap naive → overlap pessimistic | 50 promises → 1; the loser's copy stays free |
 | 5 | Member limit | naive → locked | 6 items → 3 |
 
 The catalogue goes first because it introduces lazy loading and the persistence context, which
