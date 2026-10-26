@@ -276,13 +276,14 @@ three warm-ups and ten timed calls with the SQL log silenced. The better scenari
 their response equals the naive one; the naive scenario also measures the 20 books of
 `Prolific Author`.
 
-**Measured** (Apple M3 Pro, 18 GB, PostgreSQL 17 in Docker, 321 books, one run of the scenarios):
+**Measured** (Apple M3 Pro, 18 GB, PostgreSQL 17 in Docker, normal JIT, 321 books, one run of the
+scenarios):
 
 | Version | JDBC statements | Entities loaded | Collections fetched | Median time |
 | --- | --- | --- | --- | --- |
-| Naive | 624 | 643 | 321 | 87.2 ms |
-| JOIN FETCH | 1 | 643 | 0 | 3.8 ms |
-| Projection | 1 | 0 | 0 | 2.4 ms |
+| Naive | 624 | 643 | 321 | 99.8 ms |
+| JOIN FETCH | 1 | 643 | 0 | 4.8 ms |
+| Projection | 1 | 0 | 0 | 3.2 ms |
 
 643 entities = 321 books + 302 authors + 20 subjects. The JOIN FETCH removes the statements but
 not the entities; the projection removes both.
@@ -353,13 +354,13 @@ response is part of the cost), the JSON bytes, the statuses shown and whether an
 or deadline appears in the JSON. The projection scenario also checks that it shows the same status
 for every copy as the naive one.
 
-**Measured** (Apple M3 Pro, 18 GB, PostgreSQL 17 in Docker, 20,000 copies, one run of the
-scenarios; heap is a noisy sample):
+**Measured** (Apple M3 Pro, 18 GB, PostgreSQL 17 in Docker, normal JIT, 20,000 copies, one run of
+the scenarios; heap is a noisy sample):
 
 | Version | JDBC statements | Entities loaded | JSON bytes | Median time (service + JSON) | Peak heap growth |
 | --- | --- | --- | --- | --- | --- |
-| Naive | 2 | 20,301 | 2,697,631 | 137.9 ms | 44 MB |
-| Projection | 2 | 1 (the branch) | 1,335,304 | 50.6 ms | 16 MB |
+| Naive | 2 | 20,301 | 2,697,631 | 80.3 ms | 40 MB |
+| Projection | 2 | 1 (the branch) | 1,335,304 | 41.6 ms | 16 MB |
 
 Both show 18,550 available (the 100 expired reservations included), 1,000 on loan, 400 reserved
 and 50 withdrawn, and neither contains a reservation id or deadline. The statement count is the
@@ -569,12 +570,12 @@ Lessons 4 and 5 share the `reservation` package: the member limit is part of res
 
 | Order | Lesson | Scenarios | Main number to show |
 | --- | --- | --- | --- |
-| 1 | Catalogue | naive → join-fetch → projection | 624 → 1 → 1 statements; 87 → 3.8 → 2.4 ms |
-| 2 | Shelf map | first-level-cache, naive → projection | 20,301 → 1 entities; 2.7 → 1.3 MB; 138 → 51 ms |
+| 1 | Catalogue | naive → join-fetch → projection | 624 → 1 → 1 statements; 100 → 4.8 → 3.2 ms |
+| 2 | Shelf map | first-level-cache, naive → projection | 20,301 → 1 entities; 2.7 → 1.3 MB; 80 → 42 ms |
 | 3 | Import | naive (5,000) → batched (5,000 and 20,000) | 21.5 s → 0.28 s for the same 5,000 rows; 15,001 → 3 statements |
 | 4 | Reservation | naive → pessimistic, overlap naive → overlap pessimistic | 50 promises → 1; the loser's copy stays free |
 | 5 | Member limit | naive → locked | 6 items → 4 (limit 5) |
 
 The catalogue goes first because it introduces lazy loading and the persistence context, which
-the import and the shelf map build on. The numbers in this table are expected values from the
-data volumes; the reports give the measured ones.
+the import and the shelf map build on. The numbers in this table were measured on one machine (Apple M3 Pro,
+normal JIT, one run each); expect other values elsewhere, with the same ratios.
