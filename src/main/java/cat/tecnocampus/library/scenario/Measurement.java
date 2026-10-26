@@ -3,6 +3,9 @@ package cat.tecnocampus.library.scenario;
 import jakarta.persistence.EntityManagerFactory;
 import org.hibernate.SessionFactory;
 import org.hibernate.stat.Statistics;
+import org.springframework.boot.logging.LogLevel;
+import org.springframework.boot.logging.LoggerConfiguration;
+import org.springframework.boot.logging.LoggingSystem;
 import org.springframework.stereotype.Component;
 
 import java.lang.management.ManagementFactory;
@@ -20,11 +23,15 @@ import java.util.function.Supplier;
 @Component
 public class Measurement {
 
+    private static final String SQL_LOGGER = "org.hibernate.SQL";
+
     private final Statistics statistics;
+    private final LoggingSystem logging;
     private final MemoryMXBean memory = ManagementFactory.getMemoryMXBean();
 
-    public Measurement(EntityManagerFactory entityManagerFactory) {
+    public Measurement(EntityManagerFactory entityManagerFactory, LoggingSystem logging) {
         this.statistics = entityManagerFactory.unwrap(SessionFactory.class).getStatistics();
+        this.logging = logging;
     }
 
     /** Runs the action once and counts what Hibernate sent to the database. */
@@ -40,9 +47,21 @@ public class Measurement {
 
     /**
      * Warm-up calls first (class loading, JIT, connection pool), then several timed samples.
-     * One run is not a measurement: compare medians.
+     * One run is not a measurement: compare medians. The SQL log is silenced meanwhile, otherwise
+     * the time spent writing it would be measured too.
      */
     public Timing time(int warmups, int samples, Runnable action) {
+        LoggerConfiguration sqlLog = logging.getLoggerConfiguration(SQL_LOGGER);
+        LogLevel previous = sqlLog == null ? null : sqlLog.getConfiguredLevel();
+        logging.setLogLevel(SQL_LOGGER, LogLevel.OFF);
+        try {
+            return timeSamples(warmups, samples, action);
+        } finally {
+            logging.setLogLevel(SQL_LOGGER, previous);
+        }
+    }
+
+    private static Timing timeSamples(int warmups, int samples, Runnable action) {
         for (int i = 0; i < warmups; i++) {
             action.run();
         }

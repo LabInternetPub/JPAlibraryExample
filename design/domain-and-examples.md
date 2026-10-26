@@ -238,11 +238,26 @@ error file imports nothing (Testcontainers).
 **Learned:** lazy loading, N+1, the first-level cache hiding queries, `EAGER` is not a fix,
 `JOIN FETCH`, DTO projection, `readOnly`.
 
-**Endpoints:** `GET /naive/books`, `GET /better/books?variant=join-fetch|projection`.
-Response: per book, `isbn`, `title`, `authorName`, `authorNationality`, `subjects`.
+**Endpoints:** `GET /naive/books` (optionally `?author=Prolific Author`),
+`GET /better/books/join-fetch`, `GET /better/books/projection`. The three return the same JSON:
+per book, `isbn`, `title`, `authorName`, `authorNationality` and `subjects` (sorted).
 
-**Scenarios:** `catalogue-naive`, `catalogue-join-fetch`, `catalogue-projection`. Each one lists
-the 321 books ten times after three warm-ups.
+**Scenarios:** `catalogue-naive`, `catalogue-join-fetch`, `catalogue-projection`
+(`CatalogueScenarios`). Each one lists the 321 books once with the SQL counted and logged, then
+three warm-ups and ten timed calls with the SQL log silenced. The better scenarios also check that
+their response equals the naive one; the naive scenario also measures the 20 books of
+`Prolific Author`.
+
+**Measured** (Apple M3 Pro, 18 GB, PostgreSQL 17 in Docker, 321 books, one run of the scenarios):
+
+| Version | JDBC statements | Entities loaded | Collections fetched | Median time |
+| --- | --- | --- | --- | --- |
+| Naive | 624 | 643 | 321 | 87.2 ms |
+| JOIN FETCH | 1 | 643 | 0 | 3.8 ms |
+| Projection | 1 | 0 | 0 | 2.4 ms |
+
+643 entities = 321 books + 302 authors + 20 subjects. The JOIN FETCH removes the statements but
+not the entities; the projection removes both.
 
 ```mermaid
 sequenceDiagram
@@ -265,16 +280,19 @@ sequenceDiagram
 | `@ManyToOne(fetch = LAZY) Author author` | Proxies; the default `EAGER` would load authors anyway |
 | `@ManyToMany List<Subject> subjects` (lazy by default) | An uninitialized collection loads when first touched |
 | `NaiveCatalogueService.list` walking `getAuthor()` and `getSubjects()` | The N+1, visible in the SQL log and in the count |
-| `findByAuthorNameOrderedByTitle("Prolific Author")`: 20 books, 2 statements | The first-level cache answers repeated author lookups |
+| `NaiveCatalogueService.listByAuthor("Prolific Author")`: 20 books, 22 statements (1 + 1 author + 20 subject lists) instead of 41 | The first-level cache answers repeated author lookups |
 | `@Transactional(readOnly = true)` on every catalogue service | Flush mode manual, no snapshots |
+| `BookSummary.of(book)`, shared by the naive and the JOIN FETCH services | The same mapping code: whether it queries depends only on what was fetched before |
 | `BookRepository.findAllWithAuthorAndSubjects()` (`select distinct b … join fetch b.author left join fetch b.subjects`) | One statement; managed entities still built |
-| `BookRepository.findCatalogueRows()` (`select new BookRow(b.isbn, b.title, a.name, a.nationality, s.name) …`) + grouping in the service | No managed entities at all; one row per book and subject |
+| `BookRepository.findCatalogueRows()` (`select new BookRow(b.id, b.isbn, b.title, a.name, a.nationality, s.name) …`) + grouping in `ProjectionCatalogueService` | No managed entities at all; one row per book and subject |
+| `Measurement.time` silencing the `org.hibernate.SQL` logger | Writing 624 log statements per call would be measured too |
 | `BookSummary` DTO, built in the service | Services return DTOs; nothing lazy reaches the controller (`open-in-view=false`) |
 
 **Report:** statements, entity loads, collection fetches and median time for the three variants.
 
-**Example tests:** statement-count test that the two better variants use one statement for 321
-books; a test showing `LazyInitializationException` when an entity leaves the transaction.
+**Example tests** (`CatalogueTest`): the three versions return the same 321 books; statement
+counts 624 / 1 / 1; the projection loads no entity; `LazyInitializationException` when a lazy
+association is touched after the transaction ended; the endpoints over HTTP.
 
 ## 6. Lesson 3: The shelf map of a branch
 
@@ -458,7 +476,7 @@ better version is the same `LockingReservationService` with the member lock adde
 
 | Order | Lesson | Scenarios | Main number to show |
 | --- | --- | --- | --- |
-| 1 | Catalogue | naive → join-fetch → projection | 624 → 1 → 1 statements |
+| 1 | Catalogue | naive → join-fetch → projection | 624 → 1 → 1 statements; 87 → 3.8 → 2.4 ms |
 | 2 | Shelf map | naive → projection | entity loads and response bytes |
 | 3 | Import | naive → batched | time and statements, first import and re-import |
 | 4 | Reservation | naive → pessimistic, partial naive → partial pessimistic | 50 promises → 1 |

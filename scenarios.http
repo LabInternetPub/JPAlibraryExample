@@ -9,3 +9,24 @@ GET {{host}}/scenarios
 
 ### Shelf map — the persistence context (first-level cache)
 POST {{host}}/scenarios/first-level-cache
+
+### Catalogue — naive: 1 + 1 per author + 1 per book (look at the SQL log)
+POST {{host}}/scenarios/catalogue-naive
+
+### Catalogue — JOIN FETCH: one statement, entities still built
+POST {{host}}/scenarios/catalogue-join-fetch
+
+### Catalogue — projection: one statement, no entities
+POST {{host}}/scenarios/catalogue-projection
+
+### Catalogue endpoints (the response is the same for the three)
+GET {{host}}/naive/books
+
+###
+GET {{host}}/naive/books?author=Prolific%20Author
+
+###
+GET {{host}}/better/books/join-fetch
+
+###
+GET {{host}}/better/books/projection
