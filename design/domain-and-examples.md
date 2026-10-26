@@ -299,47 +299,65 @@ association is touched after the transaction ended; the endpoints over HTTP.
 **Learned:** cost of managed entities in a read, response size, scalar projection, expiry
 computed at read time, privacy by construction, first-level cache, why not a second-level cache.
 
-**Endpoints:** `GET /naive/branches/{id}/shelf-map` and `GET /better/branches/{id}/shelf-map`.
+**Endpoints:** `GET /naive/branches/{name}/shelf-map` and `GET /better/branches/{name}/shelf-map`
+(by name, because ids are random UUIDs that change at every start). An unknown branch is a `404`
+problem+json (`NotFoundException`, `ProblemDetailsHandler`).
 
-- Naive response: one object per copy (`id, barcode, floor, shelf, isbn, title, status`).
-- Better response: shelves with parallel arrays.
+- Naive response (`NaiveShelfMap`): one object per copy (`id, barcode, floor, shelf, isbn, status`).
+- Better response (`ShelfMapResponse`): shelves with parallel arrays.
 
 ```json
 {
-  "branchId": "…",
+  "branch": "Central",
   "legend": { "A": "AVAILABLE", "L": "ON_LOAN", "R": "RESERVED", "W": "WITHDRAWN" },
   "shelves": [
-    { "floor": 1, "shelf": "1-A",
+    { "floor": 1, "shelf": "1-01",
       "copyIds": ["…", "…"], "barcodes": ["C000001", "C000002"],
-      "isbns": ["978…", "978…"], "statuses": "AL" }
+      "isbns": ["978-84-000001", "978-84-000002"], "statuses": "AA" }
   ]
 }
 ```
 
 **Scenarios:** `first-level-cache` (the concept the lesson starts from), then `shelf-map-naive` and
-`shelf-map-projection`, on `Central` (20,000 copies). Each of the last two
-also checks that the response has 100 expired reservations shown as available and contains no
-member id or deadline.
+`shelf-map-projection` (`ShelfMapScenarios`), on `Central` (20,000 copies). Both measure the SQL of
+one call, then the time and peak heap of call **plus JSON serialization** (the size of the
+response is part of the cost), the JSON bytes, the statuses shown and whether any reservation id
+or deadline appears in the JSON. The projection scenario also checks that it shows the same status
+for every copy as the naive one.
+
+**Measured** (Apple M3 Pro, 18 GB, PostgreSQL 17 in Docker, 20,000 copies, one run of the
+scenarios; heap is a noisy sample):
+
+| Version | JDBC statements | Entities loaded | JSON bytes | Median time (service + JSON) | Peak heap growth |
+| --- | --- | --- | --- | --- | --- |
+| Naive | 2 | 20,301 | 2,697,631 | 137.9 ms | 44 MB |
+| Projection | 2 | 1 (the branch) | 1,335,304 | 50.6 ms | 16 MB |
+
+Both show 18,550 available (the 100 expired reservations included), 1,000 on loan, 400 reserved
+and 50 withdrawn, and neither contains a reservation id or deadline. The statement count is the
+same: the naive version's problem is invisible to a statement counter.
 
 | Piece of code | Concept learned |
 | --- | --- |
-| `NaiveShelfMapService`: `copyRepository.findByBranchOrdered(branch)`, then `copy.getBook()` for each copy | Few statements (300 books loaded once each), but 20,300 managed entities |
-| `copy.visibleStatusAt(now)` in the naive mapper | Logical expiry as a domain rule |
-| `CopyItem` DTO without member or deadline | Mapping to a DTO is the first privacy defence |
+| `NaiveShelfMapService`: `copyRepository.findByBranchWithBooks(branch)` (`join fetch c.book`) | The N+1 is already avoided (lesson 2): 2 statements, but 20,301 managed entities |
+| `copy.visibleStatusAt(now)` in `CopyItem.of` | Logical expiry as a domain rule, with the request's `Clock` |
+| `CopyItem` DTO without reservation or deadline | Mapping to a DTO is the first privacy defence |
 | `@Transactional(readOnly = true)` | Cheaper entities, still entities |
-| Response bytes in the report | 20,000 repeated field names |
+| JSON bytes in the report | 20,000 repeated field names |
 | `CopyRepository.projectShelfMap(branch, now)`: JPQL `select new ShelfRow(…, case when c.status = RESERVED and c.reservedUntil <= :now then 'AVAILABLE' else cast(c.status as String) end)` joined with `Book`, ordered by floor and shelf | Scalars only, one query, expiry in the query |
-| `ShelfRow` record without member or deadline fields | Privacy by construction: nothing to leak |
-| `ShelfMapResponse.from(rows)` | Grouping and the compact format |
+| The `case` on the status as text, and the `ShelfRow` constructor taking a `String` | Hibernate writes an enum literal in a `CASE` as a number; PostgreSQL refuses to mix it with the text column |
+| `ShelfRow` record without reservation or deadline fields | Privacy by construction: nothing to leak |
+| `ShelfMapResponse.from(branch, rows)` and `statusesByCopy()` | Grouping into the compact format, and how a client reads it back |
+| `Clock` bean (`ClockConfiguration`) | "Now" is injected: the test reads the same data two days later and every reservation has expired |
 | `FirstLevelCacheScenario` (`first-level-cache`): two `findById` of the same copy in one `TransactionTemplate`, then in two | First-level cache: 1 statement and the same object in one transaction; 2 statements and two objects in two |
-
-**Report:** statements, entity loads, median time, heap and response bytes for both versions.
 
 **Discussion point:** a second-level cache on `Copy` would be invalidated by every loan,
 return and reservation.
 
-**Example tests:** leak test (no member id, no deadline in the JSON); expiry test (a reservation
-past its deadline is shown available); the parallel arrays of a shelf have equal lengths.
+**Example tests** (`ShelfMapTest`): both versions show the same status for every copy; with the
+clock two days ahead every reservation shows as available; 20,301 entities vs 1; 200 shelves whose
+arrays all have 100 entries; leak test over HTTP for both endpoints (no reservation id, no
+`reservationId` or `reservedUntil` field); unknown branch → `404` problem+json.
 
 ## 7. Lesson 4: Reserving the last copy
 
@@ -477,7 +495,7 @@ better version is the same `LockingReservationService` with the member lock adde
 | Order | Lesson | Scenarios | Main number to show |
 | --- | --- | --- | --- |
 | 1 | Catalogue | naive → join-fetch → projection | 624 → 1 → 1 statements; 87 → 3.8 → 2.4 ms |
-| 2 | Shelf map | naive → projection | entity loads and response bytes |
+| 2 | Shelf map | first-level-cache, naive → projection | 20,301 → 1 entities; 2.7 → 1.3 MB; 138 → 51 ms |
 | 3 | Import | naive → batched | time and statements, first import and re-import |
 | 4 | Reservation | naive → pessimistic, partial naive → partial pessimistic | 50 promises → 1 |
 | 5 | Member limit | naive → locked | 6 items → 3 |

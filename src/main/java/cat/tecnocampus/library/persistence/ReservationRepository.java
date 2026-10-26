@@ -6,6 +6,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 public interface ReservationRepository extends JpaRepository<Reservation, UUID> {
@@ -25,4 +26,8 @@ public interface ReservationRepository extends JpaRepository<Reservation, UUID> 
             from Member m where m.id = :member
             """)
     long countActiveItems(@Param("member") UUID memberId, @Param("now") Instant now);
+
+    /** Every reservation id: the shelf-map scenarios check that none of them appears in a response. */
+    @Query("select r.id from Reservation r")
+    List<UUID> findAllIds();
 }

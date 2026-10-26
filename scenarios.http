@@ -30,3 +30,18 @@ GET {{host}}/better/books/join-fetch
 
 ###
 GET {{host}}/better/books/projection
+
+### Shelf map — naive: 2 statements, but 20,301 entities and one JSON object per copy
+POST {{host}}/scenarios/shelf-map-naive
+
+### Shelf map — projection and compact format
+POST {{host}}/scenarios/shelf-map-projection
+
+### Shelf map endpoints (branch by name: ids change at every start)
+GET {{host}}/naive/branches/Central/shelf-map
+
+###
+GET {{host}}/better/branches/Central/shelf-map
+
+### Unknown branch: 404 problem+json
+GET {{host}}/better/branches/Nowhere/shelf-map

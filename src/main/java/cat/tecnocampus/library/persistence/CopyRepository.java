@@ -29,6 +29,13 @@ public interface CopyRepository extends JpaRepository<Copy, UUID> {
     List<Copy> findByBranchOrdered(@Param("branch") UUID branchId);
 
     /**
+     * Shelf map, naive: managed Copy entities with their books fetched in the same query (the
+     * catalogue lesson already avoided the N+1). Few statements, many managed entities.
+     */
+    @Query("select c from Copy c join fetch c.book where c.branch.id = :branch order by c.floor, c.shelf, c.barcode")
+    List<Copy> findByBranchWithBooks(@Param("branch") UUID branchId);
+
+    /**
      * Shelf map, better: scalars only. An expired reservation is returned as AVAILABLE, computed
      * with the request's clock, so the map is right without any cleanup. The reservation id and
      * the deadline are used in the condition but never selected.

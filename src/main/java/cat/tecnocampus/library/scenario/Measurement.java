@@ -11,6 +11,7 @@ import org.springframework.stereotype.Component;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryMXBean;
 import java.util.Arrays;
+import java.util.Locale;
 import java.util.function.Supplier;
 
 /**
@@ -106,7 +107,7 @@ public class Measurement {
     public record HeapUse(long baselineBytes, long peakIncreaseBytes) {
 
         public String peakIncrease() {
-            return String.format("%.1f MB", peakIncreaseBytes / (1024.0 * 1024.0));
+            return String.format(Locale.ROOT, "%.1f MB", peakIncreaseBytes / (1024.0 * 1024.0));
         }
     }
 
