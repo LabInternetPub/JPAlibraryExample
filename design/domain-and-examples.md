@@ -320,6 +320,35 @@ sequenceDiagram
 | `Measurement.time` silencing the `org.hibernate.SQL` logger | Writing 624 log statements per call would be measured too |
 | `BookSummary` DTO, built in the service | Services return DTOs; nothing lazy reaches the controller (`open-in-view=false`) |
 
+**`@Transactional(readOnly = true)`.** `NaiveCatalogueService` carries the comment *"readOnly:
+Hibernate keeps no snapshots and never flushes. Cheaper entities, still entities."* What it means:
+
+- **What changes.** With `readOnly = true`, Spring's JPA transaction manager tells Hibernate that
+  the transaction will not write:
+  - the session's flush mode becomes `MANUAL`: no automatic flush before queries and none at the
+    commit;
+  - the entities it loads are read-only;
+  - the JDBC connection is marked read-only, and PostgreSQL runs the transaction as `READ ONLY`.
+- **What it saves.** To find changes without being told, Hibernate normally keeps a **snapshot**
+  of every entity it loads (a copy of its values) and, at each flush, compares every managed
+  entity with its snapshot. This is dirty checking; [import.md](import.md) shows what it costs in
+  a write. A read-only entity needs no snapshot, and with no flush there is no dirty checking. For
+  the 643 entities of the naive catalogue, that is 643 snapshots neither built nor compared.
+- **What it does not save.** The entities are still entities. Hibernate still builds every
+  object, registers each one in the persistence context (so a second lookup of the same id returns
+  the same object), creates the proxies and keeps everything until the transaction ends. Lazy
+  loading still works, so `readOnly` **does not fix the N+1**: the naive catalogue sends its 624
+  statements with or without it. That is the meaning of "cheaper entities, still entities". Only
+  the projection avoids the entities, and their cost, altogether (0 entities loaded).
+- **A trap.** If code inside a read-only transaction changes an entity, nothing happens: no
+  exception, no `UPDATE`, because nothing is flushed. Use `readOnly` only on methods that
+  really only read. The write services (import, reservation) do not use it.
+- **Also a statement of intent.** Whoever reads the service knows it does not write. Some setups
+  even route read-only transactions to a database replica; this project does not.
+
+`readOnly` matters most when many entities are loaded: in the shelf-map lesson the naive version
+loads 20,300 entities, so it saves 20,300 snapshots. It is still no substitute for loading less.
+
 **Report:** statements, entity loads, collection fetches and median time for the three variants.
 
 **Example tests** (`CatalogueTest`): the three versions return the same 321 books; statement
