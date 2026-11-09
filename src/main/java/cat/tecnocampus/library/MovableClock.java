@@ -5,6 +5,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 import java.util.Objects;
 
 /**
@@ -34,9 +35,17 @@ public final class MovableClock extends Clock {
         this.system = Objects.requireNonNull(system);
     }
 
+    /**
+     * Truncated to microseconds, the precision of a PostgreSQL {@code timestamp}. The time rule is
+     * applied both in Java ({@code now < expiresAt}) and in SQL ({@code expires_at <= :now}); with
+     * nanoseconds, the driver rounds {@code deadline − 1 ns} up to the deadline, and the two would
+     * disagree about the same instant. It also keeps a stored {@code expiresAt} equal to the one
+     * the entity had in memory.
+     */
     @Override
     public synchronized Instant instant() {
-        return fixed != null ? fixed : system.instant().plus(offset);
+        Instant now = fixed != null ? fixed : system.instant().plus(offset);
+        return now.truncatedTo(ChronoUnit.MICROS);
     }
 
     /** Stops the clock at this instant: every call to {@link #instant()} returns it until moved. */

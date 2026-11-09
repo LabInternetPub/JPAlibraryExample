@@ -47,6 +47,29 @@ operations on the same reservation** (or the same loan). Fixing lessons 4 and 5 
 **Status:** stage 1 is implemented (`MovableClock`, the changes above, and the unit tests
 `ReservationExpiryTest`, `CopyCollectTest`, `LoanTest`, `MovableClockTest`).
 
+**Stage 2 is implemented** (naive transitions and naive sweep, sequential test green):
+
+| Piece | Where |
+| --- | --- |
+| `NaiveExpiryTransitions`: `collect` (time read first, plain read, `lendOwned` count ignored), `expire` (plain read, `Copy.makeAvailable`, notice before commit), `cancel` (`findById` then `lockById`: stale) | `expiry` |
+| `ReservationExpirer` (interface the sweep depends on), `ExpirySweep` (not a bean: bounded page, one transaction per candidate, a failure counts and is skipped), `ExpirySweepScheduler` (`@Scheduled(fixedDelay)`, `@ConditionalOnProperty`) | `expiry` |
+| `ExpiryNotices` (logs the notice, counts per reservation) | `expiry` |
+| `NaiveLoanReturnService` (load, `giveBack`, dirty checking) | `loan` |
+| `POST /naive/reservations/{id}/collection` (body `{"memberEmail"}`), `DELETE /naive/reservations/{id}?memberEmail=`, `POST /naive/loans/{id}/return` | `ExpiryController`, `LoanController` |
+| `GET /reservations/{id}` → `410 /problems/reservation-expired` once `Reservation.isExpiredAt(now)`; the response now has `status` | `ReservationLookupService` |
+| `ReservationRepository.findExpiredIds(now, page)`, `lockById`; `CopyRepository.lendOwned`; `LoanRepository.countOpenByCopy`; index `ix_reservation_expiry (status, expires_at)` | `persistence`, `Reservation` |
+| `Copy.makeAvailable()`: the naive, unconditional release | `Copy` |
+| Sweep off in tests: `src/test/resources/config/application.properties` | tests |
+
+**Decision found while testing: the clock has the database's precision.** `MovableClock.instant()`
+is truncated to microseconds. With nanoseconds, the PostgreSQL driver rounds `deadline − 1 ns` up to
+the deadline, so the Java rule (`now < expiresAt`: live) and the SQL rule (`expires_at <= :now`:
+expired) disagreed about the same instant: the sweep picked a live reservation and the member
+count stopped counting it. The same happens in production with a nanosecond system clock (Linux).
+It is the "keep the boundary identical in both places" rule of option B, one level lower: the same
+comparison, at the same precision. In scenarios, "one nanosecond before the deadline" is therefore
+one microsecond before it.
+
 The boundary is decided once, as in Affora: a reservation is live while `now < expiresAt`. At
 `expiresAt − 1 ns` collecting succeeds; at `expiresAt` collecting fails and expiring succeeds.
 There is no instant at which both are allowed, and none at which neither is.

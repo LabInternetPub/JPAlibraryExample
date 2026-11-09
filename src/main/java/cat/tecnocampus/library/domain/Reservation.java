@@ -8,8 +8,10 @@ import jakarta.persistence.EnumType;
 import jakarta.persistence.Enumerated;
 import jakarta.persistence.FetchType;
 import jakarta.persistence.Id;
+import jakarta.persistence.Index;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
+import jakarta.persistence.Table;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -30,6 +32,8 @@ import java.util.stream.Collectors;
  * reservations end without anyone collecting the copies.
  */
 @Entity
+// The sweep looks for ACTIVE reservations whose deadline has passed, oldest first: an index range scan.
+@Table(indexes = @Index(name = "ix_reservation_expiry", columnList = "status, expires_at"))
 public class Reservation {
 
     public static final Duration DURATION = Duration.ofHours(48);
@@ -111,6 +115,15 @@ public class Reservation {
      */
     public boolean isLiveAt(Instant now) {
         return status == ReservationStatus.ACTIVE && now.isBefore(expiresAt);
+    }
+
+    /**
+     * Expired for whoever reads it: stored as {@code EXPIRED}, or still {@code ACTIVE} with its
+     * deadline passed (nothing has swept it yet). Lazy expiry on read: decided, not written.
+     */
+    public boolean isExpiredAt(Instant now) {
+        return status == ReservationStatus.EXPIRED
+                || status == ReservationStatus.ACTIVE && !now.isBefore(expiresAt);
     }
 
     /**

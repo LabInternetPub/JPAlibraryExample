@@ -147,6 +147,17 @@ public class Copy {
         return true;
     }
 
+    /**
+     * Naive release: back to the shelf, whoever holds the copy now. Used by the naive expiry and
+     * cancellation. It frees a copy that a newer reservation took after the deadline, or a copy
+     * that went on loan meanwhile; {@link #releaseFrom(UUID)} is the version that checks.
+     */
+    public void makeAvailable() {
+        this.status = CopyStatus.AVAILABLE;
+        this.reservationId = null;
+        this.reservedUntil = null;
+    }
+
     public void returnToShelf() {
         if (status != CopyStatus.ON_LOAN) {
             throw new IllegalStateException("Only a copy on loan can be returned");

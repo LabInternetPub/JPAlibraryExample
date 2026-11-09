@@ -7,6 +7,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.time.temporal.ChronoUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -35,10 +36,19 @@ class MovableClockTest {
         clock.fixAt(deadline.minusNanos(1));
         system.advance(Duration.ofSeconds(5));
 
-        // Then
-        assertThat(clock.instant()).isEqualTo(deadline.minusNanos(1));
+        // Then: the last microsecond before the deadline, then the deadline
+        assertThat(clock.instant()).isEqualTo(deadline.minus(1, ChronoUnit.MICROS));
         clock.advance(Duration.ofNanos(1));
         assertThat(clock.instant()).isEqualTo(deadline);
+    }
+
+    @Test
+    void itHasTheDatabasesPrecisionTruncatedNeverRoundedUp() {
+        // Given: a system clock with nanoseconds, as on Linux
+        MovableClock nanos = new MovableClock(Clock.fixed(T.plusNanos(999_999_999), ZoneOffset.UTC));
+
+        // When / Then: PostgreSQL keeps microseconds; rounding up would cross into the next second
+        assertThat(nanos.instant()).isEqualTo(T.plusNanos(999_999_000));
     }
 
     @Test

@@ -5,6 +5,7 @@ import jakarta.persistence.LockModeType;
 import jakarta.persistence.QueryHint;
 import org.springframework.data.jpa.repository.JpaRepository;
 import org.springframework.data.jpa.repository.Lock;
+import org.springframework.data.jpa.repository.Modifying;
 import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.jpa.repository.QueryHints;
 import org.springframework.data.repository.query.Param;
@@ -65,6 +66,23 @@ public interface CopyRepository extends JpaRepository<Copy, UUID> {
     @QueryHints(@QueryHint(name = "jakarta.persistence.lock.timeout", value = "5000"))
     @Query("select c from Copy c where c.id in :ids order by c.id")
     List<Copy> lockCopies(@Param("ids") Collection<UUID> ids);
+
+    /**
+     * Collection, naive: every copy held by the reservation goes on loan, in one statement. The
+     * condition on {@code reservationId} is right; what the naive caller gets wrong is ignoring
+     * the count: 0 rows means "this reservation no longer holds any copy".
+     *
+     * <p>{@code flushAutomatically} writes the pending changes (the reservation's new status)
+     * before the statement; {@code clearAutomatically} empties the persistence context after it,
+     * so no managed Copy keeps the old status. Read what you need from managed entities first.
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("""
+            update Copy c set c.status = cat.tecnocampus.library.domain.CopyStatus.ON_LOAN,
+                c.reservationId = null, c.reservedUntil = null
+            where c.reservationId = :reservation
+            """)
+    int lendOwned(@Param("reservation") UUID reservationId);
 
     /** Reservation requests name copies by branch and barcode: ids change at every start of the example. */
     @Query("select new cat.tecnocampus.library.persistence.BarcodeRef(c.barcode, c.id) from Copy c "
