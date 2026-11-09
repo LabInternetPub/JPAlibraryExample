@@ -57,6 +57,50 @@ public class ExpiryRaces {
         this.loans = loans;
     }
 
+    // ---- S1: the boundary, one operation at a time ----------------------------------------------
+
+    /**
+     * Sequential, no pause points: what each reader and writer answers one microsecond before the
+     * deadline and exactly at it. Both the naive and the better versions pass: the race of S2 only
+     * exists when two transactions overlap. Returns one line per step, in order.
+     */
+    public java.util.Map<String, Object> boundary(Collect collect, ReservationExpirer expirer) {
+        java.util.Map<String, Object> steps = new java.util.LinkedHashMap<>();
+        demo.start();
+        try {
+            UUID anna = demo.member(1);
+            ReservationResponse collected = demo.reserve(1, "N0001");
+            ReservationResponse expired = demo.reserve(1, "N0002");
+            ExpirySweep sweep = new ExpirySweep(reservations, expirer, clock);
+
+            clock.fixAt(collected.expiresAt().minus(1, ChronoUnit.MICROS));
+            steps.put("1 µs before: shelf map N0001", demo.shelf("N0001"));
+            steps.put("1 µs before: GET reservation", demo.read(collected.id()));
+            steps.put("1 µs before: Anna's active items", demo.activeItems(1));
+            steps.put("1 µs before: collect N0001", ExpiryDemo.outcome(() -> collect.apply(anna, collected.id())));
+            steps.put("1 µs before: shelf map N0001 afterwards", demo.shelf("N0001"));
+
+            clock.fixAt(expired.expiresAt());
+            steps.put("at the deadline: shelf map N0002 (nothing swept yet)", demo.shelf("N0002"));
+            steps.put("at the deadline: GET reservation", demo.read(expired.id()));
+            steps.put("at the deadline: Anna's active items (1 loan)", demo.activeItems(1));
+            steps.put("at the deadline: collect N0002", ExpiryDemo.outcome(() -> collect.apply(anna, expired.id())));
+            steps.put("at the deadline: sweep, first run", sweep.sweepOnce());
+            steps.put("at the deadline: sweep, second run", sweep.sweepOnce());
+            steps.put("at the deadline: shelf map N0002 after the sweep", demo.shelf("N0002"));
+
+            clock.advance(Duration.ofDays(1));
+            steps.put("a day later: sweep (the collected one is no candidate)", sweep.sweepOnce());
+            steps.put("a day later: shelf map N0001", demo.shelf("N0001"));
+            steps.put("facts of the collected reservation", demo.facts(collected.id(), anna, "N0001"));
+            steps.put("facts of the expired reservation", demo.facts(expired.id(), anna, "N0002"));
+            log.info("[expiry boundary] {}", steps);
+            return steps;
+        } finally {
+            demo.finish();
+        }
+    }
+
     // ---- S2: collect at the deadline while the sweep expires --------------------------------------
 
     public record Round(String collect, String expire, Facts facts) {

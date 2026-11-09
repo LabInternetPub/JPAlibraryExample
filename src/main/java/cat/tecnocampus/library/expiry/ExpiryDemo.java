@@ -6,6 +6,7 @@ import cat.tecnocampus.library.domain.Copy;
 import cat.tecnocampus.library.domain.CopyStatus;
 import cat.tecnocampus.library.domain.MemberLimitExceededException;
 import cat.tecnocampus.library.domain.NotFoundException;
+import cat.tecnocampus.library.domain.ReservationExpiredException;
 import cat.tecnocampus.library.domain.ReservationNotActiveException;
 import cat.tecnocampus.library.domain.ReservationStatus;
 import cat.tecnocampus.library.loan.LoanResponse;
@@ -102,6 +103,21 @@ public class ExpiryDemo {
         return reserving.reserve(member(member), lookup.copyIds("North", List.of(barcodes)));
     }
 
+    /** {@code GET /reservations/{id}} as the member sees it: 410 once the deadline has passed. */
+    public String read(UUID reservationId) {
+        return outcome(() -> lookup.get(reservationId).status().name());
+    }
+
+    /** What the shelf map shows for a North copy now, and what its row stores. */
+    public String shelf(String barcode) {
+        Copy copy = copies.findById(copyId(barcode)).orElseThrow();
+        return "shows " + copy.visibleStatusAt(clock.instant()) + ", stored " + copy.getStatus();
+    }
+
+    public long activeItems(int member) {
+        return reservations.countActiveItems(member(member), clock.instant());
+    }
+
     public <T> Future<T> async(Callable<T> task) {
         return threads.submit(task);
     }
@@ -145,6 +161,7 @@ public class ExpiryDemo {
             case CopiesUnavailableException e -> "409 copies unavailable";
             case MemberLimitExceededException e -> "409 member limit";
             case NotFoundException e -> "404 not found";
+            case ReservationExpiredException e -> "410 gone";
             case TransitionPauses.InjectedFailure e -> "injected failure";
             default -> error.getClass().getSimpleName() + sqlState(error);
         };

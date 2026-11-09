@@ -7,6 +7,10 @@ This is the plan for the library version of Affora's UC-17 (*hold expiry*). The 
 **naive** version and a **better** version, side by side in the code, and each version has its own
 **scenario** that prints the same facts.
 
+**Status:** implemented in five stages on branch `expiry-lesson` (§9). The scenario sections (§4)
+were written before the code; the measured results are in §2 (one block per stage) and in
+`design/evidence/`, and where a measurement contradicted a prediction, §4 says so.
+
 When this lesson starts, lessons 4 and 5 are already correct: a copy cannot be promised twice, and
 a member cannot go over 5 items. Everything that goes wrong here is a new race between **two
 operations on the same reservation** (or the same loan). Fixing lessons 4 and 5 did not fix it.
@@ -236,8 +240,8 @@ Every concurrency scenario follows the protocol of `uc17.md` §4.3:
   active items, notices printed;
 - the report has one line per round, plus a summary row like the tables below.
 
-The expected numbers below are what the design predicts. They must be replaced with measured
-numbers once the code exists, as in the other lessons.
+The "expected results" below were written before the code. Every one of them was confirmed by the
+measured runs (§2, stage 3 and stage 4 blocks), except where a **Measured** note says otherwise.
 
 ### S1 · The boundary, one operation at a time (`expiry-boundary`)
 
@@ -350,14 +354,17 @@ public CollectionResponse collect(UUID memberId, UUID reservationId) {
     // Scalars only: a managed Reservation loaded here would stay stale after the lock (S3).
     ReservationKey key = reservations.transitionKey(reservationId)
             .filter(k -> k.memberId().equals(memberId)).orElseThrow(...);
-    members.lockById(key.memberId());                                // lock 1: member (lesson 5)
-    Reservation r = reservations.lockById(reservationId).orElseThrow(...);   // lock 2: reservation
-    pauses.observe("collect-validated", reservationId);
-    r.collect(clock.instant());                                      // fresh status, fresh time
-    List<Copy> locked = copies.lockCopies(r.getCopyIds());           // lock 3: copies, id order
-    locked.forEach(c -> c.collect(r.getId(), clock.instant()));      // throws if not held by r
-    locked.forEach(c -> loans.save(Loan.forCollection(r.getMember(), c, clock.instant())));
-    return CollectionResponse.from(r);
+    Member member = members.lockById(memberId).orElseThrow();        // lock 1: member (lesson 5)
+    Reservation r = reservations.lockById(reservationId).orElseThrow(...);   // lock 2: read fresh
+    Instant now = clock.instant();                                   // after the locks
+    r.collect(now);                                                  // current status, current time
+    List<Copy> held = copies.lockCopies(r.getCopyIds());             // lock 3: copies, id order
+    List<Loan> loans = held.stream().map(c -> {
+        c.collect(reservationId, now);                               // throws if not held by r
+        return Loan.forCollection(member, c, now);
+    }).toList();
+    loans.forEach(entityManager::persist);
+    return new CollectionResponse(...);
 }
 
 @Transactional
@@ -366,11 +373,13 @@ public boolean expire(UUID reservationId) {
     if (key == null) return false;
     pauses.observe("expiry-read", reservationId);
     // Never wait behind a member at the desk: skip, a later run sees the reservation again.
-    if (members.tryLockById(key.memberId()).isEmpty()) return false;          // FOR UPDATE NOWAIT
-    Reservation r = reservations.lockSkippingContested(reservationId).orElse(null); // SKIP LOCKED
+    Member member = members.lockIfFree(key.memberId()).orElse(null);         // FOR UPDATE SKIP LOCKED
+    if (member == null) return false;
+    Reservation r = reservations.lockIfFree(reservationId).orElse(null);     // FOR UPDATE SKIP LOCKED
     if (r == null || !r.expire(clock.instant())) return false;
-    int released = copies.releaseOwned(reservationId);               // conditional, see S4
-    notices.afterCommit(r);                                          // see S6
+    List<Copy> held = copies.lockCopies(r.getCopyIds());             // lock 3: copies
+    held.forEach(c -> c.releaseFrom(reservationId));                 // only if still held, see S4
+    events.publishEvent(new ExpiryNotice(...));                      // sent after the commit, see S6
     return true;
 }
 ```
@@ -431,8 +440,9 @@ Anna has the book, and the system has put it back on the shelf. Better: cancel `
 
 **Why it fails.** The lock is real, but `lockById` returns the **same Java object** the persistence
 context already holds. Acquiring a row lock does not refresh its fields. The scenario report shows
-it: the SQL log has the `FOR UPDATE`, and still the decision used `ACTIVE`. (An extra demonstration
-in the same scenario: print `r.getStatus()` after the lock, then after `entityManager.refresh(r)`.)
+it: the SQL log has the `FOR UPDATE`, and still the decision used `ACTIVE`. (Not built as a
+scenario step: printing `r.getStatus()` after the lock, then after `entityManager.refresh(r)`, is a
+good live addition in the debugger.)
 
 **Better.** Before the lock, read only scalar keys (`transitionKey`, a projection): the owner check
 needs them, and they leave the persistence context empty. The entity is loaded for the first time
@@ -485,45 +495,56 @@ the sweep expires her old reservation.
 reservation, then its copies, then the member (to "update the limit").
 
 **Forced ordering.** Each thread takes the lock the other one will need (the reservation service:
-Anna's member row; the sweep: copy N0003) and then they meet at a `RaceWindow` barrier armed only in
-this naive scenario. Each then asks for the lock the other holds.
+Anna's member row; the sweep: copy N0003) and stops there (`TransitionPauses` stop points
+`reserve-member-locked` and `expiry-copies-locked`; a `RaceWindow` call inside
+`MemberLockingReservationService` would have broken lesson 5). Both are then resumed, and each asks
+for the lock the other holds. After both finish, the round runs the expiry once more
+(`expireAgain`), as the next sweep would.
 
 **Expected result:** naive: PostgreSQL detects the cycle and aborts one transaction with
 `40P01 deadlock detected` after `deadlock_timeout` (1 s). If it is Anna's, she gets a `500` (or the
 mapped `503`) for a request that had nothing wrong with it. Better: one lock order everywhere
 (**member → reservation → copies → loans**) for reserve, collect, cancel and expire; the scenario
-reports 0 deadlocks in ten rounds. In addition the better sweep uses `NOWAIT` on the member and
-`SKIP LOCKED` on the reservation, so it gives up instead of waiting: Anna never waits behind the
-sweep.
+reports 0 deadlocks. In addition the better sweep uses `SKIP LOCKED` on the member and the
+reservation, so it gives up instead of waiting: Anna never waits behind the sweep.
+
+**Measured** (5 rounds each): naive, the sweep was the one aborted with `40P01` every round, and Anna
+got `201`; better, the sweep returned `false` at once (Anna's request held the member), Anna got
+`201`, and `expireAgain` expired the old reservation.
 
 **Concepts:** lock order; a deadlock is detected and costs an abort and a second, not a hang; the
-worker never waits (`NOWAIT`, `FOR UPDATE SKIP LOCKED`); why skipping is safe (the reservation stays
+worker never waits (`FOR UPDATE SKIP LOCKED`; `NOWAIT` would throw and abort the PostgreSQL
+transaction); why skipping is safe (the reservation stays
 `ACTIVE` and expired in the database, the next run sees it again) and what it costs (bookkeeping is
 late, not wrong).
 
 ### S6 · Two application instances sweep at once (`sweep-two-workers-*`)
 
 **Story.** The library runs two instances behind a load balancer. Each has its own scheduler, so
-both sweeps start at 10:00 on the same 200 expired reservations.
+both sweeps start at 10:00 on the same 100 expired reservations (one page each).
 
 **Naive version.** The S2 naive `expire`, called by two `sweepOnce()` in two threads. Both read
 `ACTIVE`, both decide in Java, both write `EXPIRED`.
 
-**Expected result:**
+**Forced ordering.** The two sweeps meet (`TransitionPauses.meetAt`) after reading their candidates
+and after reading each reservation, so both read it before either writes.
+
+**Measured:**
 
 | Version | Reservations expired | `expire` returned `true` | Notices printed | Max notices for one reservation |
 | --- | --- | --- | --- | --- |
-| Naive | 200 | ~400 | ~400 | 2 |
-| Better (`SKIP LOCKED`) | 200 | 200 | 200 | 1 |
+| Naive | 100 | 200 | 200 | 2 |
+| Better (`SKIP LOCKED`) | 100 | 100 (51 + 49) | 100 | 1 |
 
 The final rows look right in both versions: `EXPIRED` twice is still `EXPIRED`, and an `AVAILABLE`
 copy made `AVAILABLE` again does not change. **Only the side effects show the bug**: every member
 received two e-mails. With a counter (a stored available count, or Affora's quota) the counter would
 be wrong too.
 
-**Also in this scenario, the notice and the transaction.** The naive version prints the notice
-inside the transaction. The scenario makes the 50th reservation fail after printing (a test hook
-throws), so its transaction rolls back: the member was told "expired" about a reservation that is
+**S6b, the notice and the transaction** (its own scenarios, `expiry-notice-rollback-naive` and
+`expiry-notice-after-commit`). The naive version prints the notice inside the transaction. Of three
+expired reservations, the second fails right after its notice (`TransitionPauses.failAt`), so its
+transaction rolls back: the member was told "expired" about a reservation that is
 still `ACTIVE`. The better version publishes an event and prints from a
 `@TransactionalEventListener(phase = AFTER_COMMIT)`: a rolled-back expiry prints nothing. This is the
 library's version of Affora's "charged, but no ticket": something left the system that the database
@@ -535,22 +556,24 @@ versus side effects as evidence.
 
 ### S7 · One big sweep versus a bounded sweep (`sweep-one-transaction`, `sweep-batched`)
 
-**Story.** The sweep was disabled for a weekend. On Monday there are 5,000 expired reservations.
-While the sweep runs, 20 members try to collect *live* reservations whose members also have expired
-ones.
+**Story.** The sweep was disabled for a weekend. On Monday there are 1,000 expired reservations.
+While the sweep runs, Bruno reserves the copy of the first one, which the sweep has already
+released. Then the same backlog again, with one reservation in the middle failing.
 
-**Naive version.** One method with both annotations:
+**Naive version** (`OneTransactionSweep`). Typically written as
+`@Scheduled(fixedRate = 60_000) @Transactional public void sweep()`; here a scenario calls it. Every
+expired reservation, unpaged, each through the naive `expire`, which **joins** the sweep's
+transaction (propagation `REQUIRED`):
 
 ```java
-@Scheduled(fixedRate = 60_000)
 @Transactional
-public void sweep() {
-    for (Reservation r : reservations.findAllActive())             // every active reservation
-        if (r.expire(clock.instant())) { r.copies()…; notices.expired(r); }
+public SweepResult sweepAll() {
+    for (UUID id : reservations.findExpiredIds(clock.instant(), Pageable.unpaged()))
+        transitions.expire(id);                    // joins this transaction: nothing commits until the end
 }
 ```
 
-**Expected result** (measured with the scenario report of lessons 1–3):
+**Expected result** (the prediction; see **Measured** below):
 
 | Fact | Naive | Better (100 per page, one transaction each) |
 | --- | --- | --- |
@@ -561,12 +584,20 @@ public void sweep() {
 | One poisoned reservation (hook throws) | everything rolls back, 0 expired | 4,999 expired, the failing one stays a candidate |
 | Runs needed for 5,000 | 1 (if it survives) | 50 runs; "60 s" is the interval, not the maximum delay |
 
+**Measured** (1,000 reservations; stage 3 and 4 blocks of §2): the naive sweep took 6.2–8.0 s,
+3,061 statements + 1,999 batches; Bruno **timed out after 5 s** (`55P03`, a `503`) instead of
+waiting to the end; one failure left 0 expired and 501 notices sent. The bounded sweep took
+**12.4 s** in 11 runs (5,011 statements + 2,000 batches), Bruno got `201` after 19 ms, and the
+failing reservation was retried by the next run (1,000 expired, 1,000 notices). The heap peak was
+about the same (86 MB against 90 MB, noisy). So the prediction was right about waiting and
+failures, and wrong about time and memory: at this size the bounded sweep is about twice as slow.
+
 Two traps to show in the code of the better version:
 
 - **Self-invocation.** `ExpirySweep.sweepOnce()` calls `transitions.expire(id)` on **another bean**.
-  The scenario also contains a deliberately wrong variant that calls `this.expire(id)`: the SQL log
-  shows no transaction per candidate, and `@Modifying` queries fail with "no transaction in
-  progress".
+  (Not built as a scenario: a variant calling `this.expire(id)` would get no transaction per
+  candidate, and its `@Modifying` queries would fail with "no transaction in progress". Show it in
+  the code.)
 - **`fixedRate` versus `fixedDelay`.** With `fixedRate`, a run longer than the interval is followed
   immediately by the next one; with `fixedDelay` the delay starts when the previous run ends.
 
@@ -632,7 +663,7 @@ Every concept of `uc17.md`, and where the library shows it.
 | Scalar projection before the lock | 3.2 | S3, S2 (A) |
 | Fresh time after the lock | 3.2 | S2 |
 | Same lock order everywhere | 3.2 | S5 |
-| The worker never waits: `NOWAIT`, `SKIP LOCKED` | 3.2 | S5, S6 |
+| The worker never waits: `SKIP LOCKED` (`NOWAIT` rejected, §2 stage 4) | 3.2 | S5, S6 |
 | Conditional `UPDATE`, `@Modifying` flags, duplicated time rule | 3.3 | S2 (B), S4, S8 |
 | Lazy expiry on reads (no write) | 3.5 | S1 (shelf map, `410`, member count) |
 | Lazy expiry on writes that happen anyway | 3.5 | S4 (reservation takes an expired copy) |
@@ -644,7 +675,7 @@ Every concept of `uc17.md`, and where the library shows it.
 | Self-invocation | 3.6 | S7 |
 | Tests must not race the real worker | 3.6 | §3, tests |
 | Confirmation removes the deadline instead of extending it | 3.7 | S1 (the loan replaces the deadline) |
-| Something left the system that the database does not confirm ("charged, no ticket") | 1, 3.7 | S2 (expiry e-mail to a member holding the book), S6 (notice after commit) |
+| Something left the system that the database does not confirm ("charged, no ticket") | 1, 3.7 | S2 (expiry e-mail to a member holding the book), S6b (notice after commit) |
 | Forced interleavings with pause points, both orderings, ten rounds | 4.3 | S2, S3, S8 |
 | No `@Transactional` on the test; assert every fact after commit | 4.3 | all concurrency scenarios and tests |
 
@@ -669,17 +700,13 @@ Show this table after S2, before the better version.
 
 | Test | Kind | What it checks |
 | --- | --- | --- |
-| `ReservationExpiryTest` | unit, no Spring | `isLiveAt`, `collect`, `expire`, `cancel` at `expiresAt − 1 ns` and at `expiresAt`; a collected reservation cannot expire or be cancelled. If it needs a database, the rule is in the wrong layer |
-| `CopyCollectTest` | unit | `Copy.collect` only for the reservation that holds the copy and before `reservedUntil`; `releaseFrom` ignores another reservation |
-| `ExpiryTransitionTest` | sequential integration, `MovableClock` | S1's table, for one and for two copies; the sweep twice changes nothing the second time |
-| `ExpiryRaceTest` | concurrency, `TransitionPauses` | S2 both orderings, ten rounds each, on the better version (the naive version's test captured once, then `@Disabled` with the captured output in the commit message) |
-| `StaleCancelTest` | concurrency | S3 |
-| `SweepOwnershipTest` | sequential | S4 |
-| `SweepWorkersTest` | concurrency | S6: two workers, every reservation expired once, one notice each; the worker skips a reservation whose member is locked, in under 2 s |
-| `SweepBatchTest` | sequential | 101 expired: the first run handles 100, the second the last one |
-| `ReturnTest` | concurrency | S8 |
-| `SweepDisabledTest` | context | the `ExpirySweep` bean is absent when the property is false |
-| `TransactionalTestIsMisleadingTest` | integration | inside a `@Transactional` test a collection looks committed; another connection sees nothing; after rollback nothing remains |
+| `ReservationExpiryTest` | unit, no Spring | `collect`, `expire`, `cancel` one nanosecond before and exactly at `expiresAt`; a second expiry returns `false`; a collected reservation cannot expire or be cancelled. If it needed a database, the rule would be in the wrong layer |
+| `CopyCollectTest` | unit | `Copy.collect` only for the reservation that holds the copy and before `reservedUntil`; `releaseFrom` leaves a copy another reservation has taken |
+| `LoanTest`, `MovableClockTest` | unit | idempotent `giveBack`, `forCollection`; the clock stops, moves, resets, and truncates (never rounds up) to microseconds |
+| `ExpiryTransitionTest` | sequential integration, naive | S1 (the boundary, `410`, lazy expiry on reads, the sweep twice), cancellation, return, the sweep's page bound (3 candidates, pages of 2), the scheduler bean absent in tests |
+| `ExpiryRaceTest` | concurrency, the mandatory test | S2 both orderings × 10 fresh fixtures, on options A and B; every fact after both commits. It failed on the naive version (stage 3), captured in `design/evidence/expiry-naive-race.log`, then was disabled until stage 4 |
+| `ExpiryNaiveScenariosTest` | concurrency | every naive driver (S1–S8) does exactly the damage its scenario claims, on every run; every scenario is registered |
+| `ExpiryBetterScenariosTest` | concurrency | every better driver keeps the invariant: S1 boundary on A and B, S3, S4 and S6 and S6b on A and B, S5 (skip, then expire), S7 (bounded sweep drains 250 in 4 runs; a failure is retried), S8 |
 
 Three rules, from `uc17.md` §4.3: no `@Transactional` on concurrency tests; assert every fact of
 the invariant after both have committed, not only the reservation status or the return values;
@@ -707,30 +734,33 @@ ten fresh fixtures per ordering, and both orderings.
 
 ---
 
-## 9. Proposed commits (naive first)
+## 9. Commits (naive first), branch `expiry-lesson`
 
-| Stage | Content |
-| --- | --- |
-| 1 | `MovableClock`, `ReservationStatus.EXPIRED`, domain methods and unit tests (S1's rule) |
-| 2 | Naive transitions and naive sweep, `ExpiryTransitionTest` green (sequential) |
-| 3 | `TransitionPauses`, naive scenarios S2–S8; `ExpiryRaceTest` captures the failure, then `@Disabled` |
-| 4 | Better transitions (A and B), ordered locks, `SKIP LOCKED`, `releaseOwned`, after-commit notices, bounded sweep; tests re-enabled and green |
-| 5 | Measured numbers in this document, `concepts.md` and `domain-and-examples.md` updated, `scenarios.http` requests |
+| Stage | Commit | Content |
+| --- | --- | --- |
+| plan | `b6666b7` | This document, as first written |
+| 1 | `c6ba1c9` | `MovableClock`, `ReservationStatus.EXPIRED`, domain methods and unit tests (S1's rule) |
+| 2 | `07da9a9` | Naive transitions and naive sweep, `ExpiryTransitionTest` green (sequential) |
+| 3 | `f997962` | `TransitionPauses`, naive scenarios S2–S8; `ExpiryRaceTest` captures the failure, then `@Disabled` |
+| 4 | `e43dbf4` | Better transitions (A and B), ordered locks, `SKIP LOCKED`, `releaseOwned`, after-commit notices, bounded sweep; tests re-enabled and green |
+| 5 | (this commit) | The `expiry-boundary` scenario (S1, missing until then); measured numbers in this document, `concepts.md` and `domain-and-examples.md` updated, `scenarios.http` requests |
 
 ## 10. Demonstration order
 
 | Order | Scenario | Main point to show |
 | --- | --- | --- |
-| 1 | `expiry-boundary` | All green. Ask: "if both collect and expire return true, what does Anna have?" |
-| 2 | `collect-expiry-naive` | Both `true`; the copy is on the shelf map and in Anna's bag |
+| 1 | `expiry-boundary` | Every answer right, on the naive version. Ask: "if both collect and expire return true, what does Anna have?" |
+| 2 | `collect-expiry-naive` | Both succeed in 10 of 10 rounds, each ordering; the copy is on the shelf map and in Anna's bag |
 | 3 | SQL log of round 1 | `update reservation set status=? … where id=?`: no condition on the status |
 | 4 | `collect-expiry-locked`, `collect-expiry-conditional` | Exactly one winner, all facts consistent |
 | 5 | `cancel-stale-naive` → `cancel-locked` | The lock was taken, the decision was still stale |
 | 6 | `sweep-after-rereserve-naive` → `-owned` | No concurrency needed to lose a promise |
 | 7 | `sweep-deadlock-naive` → `sweep-ordered` | `40P01` once, then never |
-| 8 | `sweep-two-workers-naive` → `-skip-locked` | 400 e-mails → 200 |
-| 9 | `sweep-one-transaction` → `sweep-batched` | Desk waits; one failure undoes 5,000 |
-| 10 | `return-double-scan-naive` → `return-conditional` | A retry erased Bruno's reservation |
+| 8 | `sweep-two-workers-naive` → `-skip-locked` | 200 e-mails → 100 |
+| 9 | `expiry-notice-rollback-naive` → `expiry-notice-after-commit` | A notice for an expiry that did not happen → none |
+| 10 | `sweep-one-transaction` → `sweep-batched` | Bruno times out after 5 s → 19 ms; one failure undoes 1,000 → costs one; and the bounded sweep is slower in total |
+| 11 | `return-double-scan-naive` → `return-conditional` | A retry erased Bruno's reservation → the retry changes nothing |
+| 12 | `scenarios.http`, "Expiry endpoints, live" | Reserve, move the clock 48 h, `GET` → `410` while the row says `ACTIVE`, collect → `409` |
 
 ## 11. Questions to check understanding
 

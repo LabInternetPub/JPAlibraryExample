@@ -39,6 +39,25 @@ class ExpiryScenarios {
     }
 
     @Bean
+    Scenario expiryBoundary(NaiveExpiryTransitions naive) {
+        return new SimpleScenario("expiry-boundary", LESSON,
+                "S1: one operation at a time, one microsecond before the deadline and exactly at it (naive)",
+                scenario -> {
+                    ScenarioReport.Builder report = ScenarioReport.of(scenario);
+                    races.boundary(naive::collect, naive).forEach(report::result);
+                    return report
+                            .note("Every answer is right, on the naive version: one operation at a time, nothing "
+                                    + "can go wrong. Sequential tests cannot see the race of collect-expiry-naive.")
+                            .note("Lazy expiry on reads: at the deadline the shelf map, GET and the member's count "
+                                    + "already treat the reservation as expired while its rows still say "
+                                    + "ACTIVE / RESERVED. The sweep only stores what every reader already applies.")
+                            .note("Collecting removed the deadline: a day later the copy is still ON_LOAN and the "
+                                    + "collected reservation is no sweep candidate.")
+                            .build();
+                });
+    }
+
+    @Bean
     Scenario collectExpiryNaive(NaiveExpiryTransitions naive) {
         return new SimpleScenario("collect-expiry-naive", LESSON,
                 "S2: Anna collects one microsecond before the deadline while the sweep expires her reservation",

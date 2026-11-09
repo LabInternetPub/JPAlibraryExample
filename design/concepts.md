@@ -6,6 +6,10 @@ This repository is a small Spring Boot application used to teach the concepts of
 Deliverable 2 (performance and contention). It uses a **different domain**, a public library, so it
 does not hand students the Affora solution.
 
+A sixth lesson, reservation expiry, collection and return, carries Affora's UC-17 (Deliverable 3).
+Its full plan, with the measured results, is in
+[reservation-expiry-and-return.md](reservation-expiry-and-return.md).
+
 Each concept is implemented twice, **side by side in the code**: a **naive** version that works for
 one user and a little data, and a **better** version. Each version has its own **scenario**. The
 professor demonstrates the scenarios by running the application, and both scenarios print the
@@ -30,6 +34,7 @@ same measurements so the numbers can be compared.
 | UC-12 Seat map of a performance | Shelf map of a branch: status of every copy (available, on loan, reserved, withdrawn) | Entities vs scalar projections, read-only transactions, first-level cache, response size, expiry computed at read time, privacy |
 | UC-14 Temporary seat hold | Reserve copies for 48 h. Fifty members try to reserve the last copy of a bestseller at the same instant | Lost update, check-then-act, pessimistic lock, lock order, rollback |
 | UC-15 Per-person ticket limit | At most 5 active items (loans plus live reservations) per member | Write skew, phantoms, turning the limit into a conflict on one lockable row |
+| UC-17 Hold expiry (Deliverable 3) | A reservation is collected at the desk (it becomes loans) or expires after 48 h (a sweep stores it and notifies the member); returning a copy | Two transitions on one row, controllable time, lazy expiry vs sweep, stale managed entity, lock order and deadlock, `SKIP LOCKED`, conditional updates, side effects after commit, idempotent retry |
 
 ## 2. Running and demonstrating
 
@@ -73,6 +78,7 @@ the size of the shelf map, or the absence of member data in it).
 | Shelf map | `shelf-map-naive`, `first-level-cache` | `shelf-map-projection` |
 | Reservation | `reservation-naive`, `reservation-overlap-naive` | `reservation-pessimistic`, `reservation-overlap-pessimistic` |
 | Member limit | `member-limit-naive` | `member-limit-locked` |
+| Expiry | `expiry-boundary` (both versions pass), `collect-expiry-naive`, `cancel-stale-naive`, `sweep-after-rereserve-naive`, `sweep-deadlock-naive`, `sweep-two-workers-naive`, `expiry-notice-rollback-naive`, `sweep-one-transaction`, `return-double-scan-naive` | `collect-expiry-locked`, `collect-expiry-conditional`, `cancel-locked`, `sweep-after-rereserve-owned`, `sweep-ordered`, `sweep-two-workers-skip-locked`, `expiry-notice-after-commit`, `sweep-batched`, `return-conditional` |
 
 ### 2.3 What a scenario reports
 
@@ -114,6 +120,15 @@ read before any thread writes, and the bad interleaving happens on every run. Ex
 that the barrier makes a possible schedule visible. It does not measure how often that schedule
 happens in real traffic.
 
+The expiry lesson needs more than "everybody meets": it needs **one specific order** ("collection
+validates, expiry reads, collection commits, expiry continues"). `TransitionPauses` gives the
+services named pause points (`collect-read`, `expiry-read`, …). A scenario can **stop** one thread at
+a point until it says "go on", make N threads **meet** at one point, or make a thread **fail** there.
+Time is controlled the same way: the application's `Clock` bean is a `MovableClock`, which the
+scenarios stop one microsecond before a deadline and then move to it. Those scenarios run with the
+clock 30 days in the past, so they never touch Central's example reservations, and the scheduled
+sweep is off by default (`library.expiry.sweep-enabled=false`).
+
 ## 3. Cross-cutting concepts
 
 ### 3.1 Transactions in Spring
@@ -126,6 +141,15 @@ happens in real traffic.
   does not. This is how "a rejected request leaves no trace" is achieved.
 - **`open-in-view=false`:** lazy data must be loaded inside the service transaction, otherwise it
   fails with `LazyInitializationException`. That is one reason services return DTOs.
+- **Propagation `REQUIRED`:** a `@Transactional` method called from inside another transaction
+  joins it instead of starting its own. One `@Transactional` around a whole sweep therefore turns
+  a thousand small transactions into one big one (expiry lesson, S7).
+- **Bulk updates (`@Modifying`)** bypass the persistence context: `flushAutomatically` writes the
+  pending changes first, `clearAutomatically` empties the context afterwards, so no managed entity
+  keeps an old value.
+- **Side effects after commit:** `@TransactionalEventListener(phase = AFTER_COMMIT)` runs only once
+  the transaction has committed. A notice sent inside the transaction cannot be taken back by a
+  rollback.
 
 ### 3.2 Concurrency
 
@@ -137,8 +161,15 @@ happens in real traffic.
   - a rejection is `409 Conflict` as `application/problem+json` (`ProblemDetail`), with a field
     that lists what was unavailable;
   - a lock timeout is mapped too, never left as a `500`.
+- **Locks that never wait:** `FOR UPDATE SKIP LOCKED` returns no row if another transaction holds
+  it; a background job uses it to skip busy rows instead of waiting behind a user. (`NOWAIT` throws
+  instead, and in PostgreSQL a failed statement aborts the whole transaction.)
+- **Deadlocks are detected, not endless:** after `deadlock_timeout` (1 s) PostgreSQL aborts one of
+  the transactions in the cycle with SQL state `40P01`. One lock order everywhere prevents them.
+- **Timestamp precision:** PostgreSQL stores microseconds. A time rule applied in Java and in SQL
+  must compare at the same precision, so the application clock is truncated to microseconds.
 
-## 4. The five lessons
+## 4. The six lessons
 
 ### 4.1 Bulk import (write-side N+1)
 
@@ -376,6 +407,62 @@ The second tab waits for the first tab to commit, then counts 4 and is rejected 
 - **The cost:** all operations of the same member are serialized. Operations of different members
   are not affected.
 
+### 4.6 Reservation expiry, collection and return (two transitions on one row)
+
+The full plan, every scenario with its forced interleaving, the measured results and the
+demonstration order are in [reservation-expiry-and-return.md](reservation-expiry-and-return.md).
+This is the summary.
+
+**Scenario.** A reservation lives 48 h. Before the deadline the member **collects** it at the desk:
+the copies go on loan and the deadline disappears. After it, the reservation **expires**: a
+scheduled sweep stores `EXPIRED`, gives the copies back and prints a notice with the member's email
+and the barcodes. Readers (shelf map, `GET /reservations/{id}` → `410`, the member count) apply the
+deadline themselves, before any sweep. Returning a copy closes its loan.
+
+**The invariant, before any code.** For each reservation exactly one of collection and expiry wins,
+and its effects (reservation status, copies, loans, active items, notice) happen exactly once.
+
+**Naive (`NaiveExpiryTransitions`, `NaiveLoanReturnService`).** Every method is `@Transactional`,
+the time rule is in `Reservation`, and every sequential test passes (`expiry-boundary`). Forced
+interleavings break it on every round:
+
+- **Lost update between two transitions:** collection and expiry both read `ACTIVE`, both decide in
+  Java, both succeed; dirty checking's `UPDATE … WHERE id = ?` lets the second overwrite the first.
+  Anna has an open loan of a copy the shelf map shows as available.
+- **Time read too early**, and **an ignored row count** (0 copies lent, loans created anyway).
+- **The stale managed entity:** a cancellation that loads the reservation, then locks it, decides on
+  the object it read before waiting: the lock does not refresh it.
+- **Lazy expiry has a price:** a late sweep frees a copy that a newer reservation took after the
+  deadline, without any concurrency.
+- **Lock order:** a sweep that locks reservation → copies → member deadlocks (`40P01`) with a
+  reservation that locks member → copies.
+- **Two instances, one table:** two sweeps expire every reservation twice; the rows look right,
+  only the notices (two per member) show it.
+- **Side effects inside the transaction:** a notice sent before a rollback stays sent.
+- **One `@Transactional` sweep** holds every released copy until the end (a member's request times
+  out) and one failure undoes everything.
+- **A retried return** writes every column of its stale `Copy` and erases a reservation made in
+  between.
+
+**Better.** Option A (`LockingExpiryTransitions`, the reference): read scalar keys first (a
+projection); lock **member → reservation → copies**, the order every operation uses; read the
+clock after the locks; load the reservation for the first time under its lock and let the domain
+decide; the sweep uses `SKIP LOCKED` and skips busy rows. Option B (`ConditionalExpiryTransitions`):
+a conditional `UPDATE` decides by affected rows, and every row count is checked. Notices are sent
+by an `AFTER_COMMIT` listener. The sweep is bounded (pages of 100, oldest first, an index), one
+transaction per reservation, through another bean. The return is a conditional update on the loan,
+idempotent on retry.
+
+**Points to explain:**
+
+- `@Transactional` is not arbitration; one row must be the referee.
+- Why skipping is safe: the reservation stays `ACTIVE` and expired, and the next run expires it.
+- The sweep does bookkeeping; correctness comes from every reader and writer applying the rule.
+- The bounded sweep was measured **slower in total** than the one-transaction sweep (12.4 s against
+  6.2 s for 1,000). It is not about throughput: nobody waits behind it, a failure costs one
+  reservation, and no false notice is sent.
+- Notices are at most once; exactly once needs an outbox table.
+
 ## 5. Code organization
 
 - **Layers, as in Affora:** controllers → application services, which return DTOs → rich domain
@@ -392,7 +479,9 @@ The second tab waits for the first tab to commit, then counts 4 and is rejected 
   - the `CommandLineRunner`;
   - `ScenarioController`;
   - the measurement helper (`SessionEventListener` and Hibernate `Statistics`, timer, heap);
-  - the `RaceWindow` bean.
+  - the `RaceWindow` bean;
+  - `TransitionPauses` (named stop / meet / fail points) and `DemoClockController` (moves the
+    application's `MovableClock` from `scenarios.http`).
 - **Repository root:**
   - `scenarios.http`;
   - `compose.yaml` (PostgreSQL);
@@ -405,7 +494,10 @@ The second tab waits for the first tab to commit, then counts 4 and is rejected 
   - **Concurrency tests:**
     - fifty threads for one copy: exactly one success;
     - three copies with one already taken: nothing left reserved;
-    - two tabs against the member limit: one accepted, one rejected.
+    - two tabs against the member limit: one accepted, one rejected;
+    - collection against expiry, both orderings forced, ten rounds each, every fact checked after
+      both commits (`ExpiryRaceTest`; it failed on the naive version, captured in
+      `design/evidence/expiry-naive-race.log`, before the fix).
   - **Leak test** for the shelf map: the response never contains member data or a deadline.
 
 ## 6. Vocabulary
@@ -434,7 +526,13 @@ The second tab waits for the first tab to commit, then counts 4 and is rejected 
   - lost update;
   - write skew;
   - pessimistic lock (`PESSIMISTIC_WRITE`, `SELECT … FOR UPDATE`);
-  - deadlock and lock ordering.
+  - deadlock and lock ordering;
+  - conditional update and affected-row count;
+  - `SKIP LOCKED`.
+- **Time:**
+  - injected / controllable clock;
+  - lazy expiry vs scheduled sweep;
+  - `fixedDelay` vs `fixedRate`.
 - **Testing and measuring:**
   - `CountDownLatch` / `ExecutorService`;
   - Testcontainers;
@@ -453,4 +551,5 @@ The second tab waits for the first tab to commit, then counts 4 and is rejected 
   - phantom read;
   - snapshot isolation / `REPEATABLE READ`;
   - `SERIALIZABLE`.
-- **Locking:** lock timeout.
+- **Locking:** lock timeout, `NOWAIT`.
+- **Side effects:** `@TransactionalEventListener`, at-most-once vs exactly-once, outbox.

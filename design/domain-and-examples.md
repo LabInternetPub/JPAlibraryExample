@@ -8,7 +8,10 @@ The concepts themselves are described in [concepts.md](concepts.md).
 
 A public library has several **branches**. Each branch holds physical **copies** of **books**. A
 book has one **author** and a few **subjects**. **Members** borrow copies (**loans**) or reserve
-them for 48 hours (**reservations**). A member can have at most 5 active items at a time.
+them for 48 hours (**reservations**). A member can have at most 5 active items at a time. A
+reservation ends exactly once: **collected** at the desk (its copies become loans), **cancelled**
+by the member, or **expired** after its deadline (a scheduled sweep stores it and notifies the
+member). A loan ends when the copy is **returned**.
 
 ```mermaid
 classDiagram
@@ -46,6 +49,9 @@ classDiagram
         visibleStatusAt(now) CopyStatus
         reserve(reservationId, until, now)
         lend(now)
+        collect(reservationId, now)
+        releaseFrom(reservationId) boolean
+        makeAvailable()
         returnToShelf()
         withdraw()
         reimport(floor, shelf, condition) boolean
@@ -60,7 +66,9 @@ classDiagram
         Instant startedAt
         Instant dueAt
         boolean returned
-        giveBack()
+        Instant returnedAt
+        forCollection(member, copy, now)$
+        giveBack(now) boolean
         isOpen() boolean
     }
     class Reservation {
@@ -73,6 +81,10 @@ classDiagram
         checkAvailable(requested, found, now)$
         reserve(copies, now)
         isLiveAt(now) boolean
+        isExpiredAt(now) boolean
+        collect(now)
+        expire(now) boolean
+        cancel(memberId, now)
     }
     class MemberLimit {
         <<domain rule>>
@@ -96,7 +108,7 @@ classDiagram
 | --- | --- |
 | `CopyStatus` | `AVAILABLE`, `ON_LOAN`, `RESERVED`, `WITHDRAWN` |
 | `Condition` | `NEW`, `GOOD`, `WORN`, `DAMAGED` |
-| `ReservationStatus` | `ACTIVE`, `CANCELLED`, `COLLECTED` |
+| `ReservationStatus` | `ACTIVE`, `CANCELLED`, `COLLECTED`, `EXPIRED` (`ACTIVE` is left exactly once) |
 
 ### 1.2 Domain rules
 
@@ -114,6 +126,12 @@ The rules live in the entities, never in the services. The services orchestrate 
 | A reservation is live while `ACTIVE` and not expired | `Reservation.isLiveAt(now)` | Member limit |
 | A member has at most 5 active items (open loans + copies in live reservations) | `MemberLimit.check(existing, requested)` | Member limit |
 | Re-importing a copy changes only its physical attributes; it keeps its id and status | `Copy.reimport(...)` | Import |
+| Collect only while live (`now < expiresAt`); expire only once due (`now >= expiresAt`): no instant allows both, none allows neither | `Reservation.collect(now)`, `Reservation.expire(now)` (returns `true` only for the call that must release) | Expiry |
+| Expired for a reader as soon as the deadline passes, swept or not (`GET` answers `410`) | `Reservation.isExpiredAt(now)` | Expiry |
+| Only the member, and only while live, can cancel; another member's reservation is "not found" | `Reservation.cancel(memberId, now)` | Expiry |
+| A reserved copy is collected only by the reservation holding it, before its deadline; the deadline disappears | `Copy.collect(reservationId, now)`; `Loan.forCollection(...)` records it | Expiry |
+| An ended reservation gives a copy back only if it still holds it | `Copy.releaseFrom(reservationId)` (`makeAvailable()` is the naive, unconditional release) | Expiry |
+| Returning a loan is idempotent: a retry has no second effect | `Loan.giveBack(now)` returns `true` only for the call that closed it | Expiry |
 
 ### 1.3 Mapping decisions and what they teach
 
@@ -140,7 +158,7 @@ start begins from the same data; ids are random UUIDs, so scenarios find rows by
 | Authors | 302: `Author 001`–`Author 300` (one per book), `Prolific Author` (20 books), `Bestselling Author` (the bestseller) | Catalogue |
 | Subjects | 20 | Catalogue |
 | Books | 321: `Title 001`–`Title 300` (ISBN `978-84-000001`…), `Prolific Title 301`–`320`, and `The Last Copy` (ISBN `978-84-999999`); each with 2–4 subjects (963 links) | Catalogue, Shelf map |
-| Copies in `Central` | 20,000 (`C000001`–`C020000`) over books 1–300; 5 floors × 40 shelves × 100 copies | Shelf map |
+| Copies in `Central` | 20,000 (`C000001`–`C020000`) over books 1–300; 5 floors × 40 shelves × 100 copies | Shelf map; the expiry sweep scenarios reserve hundreds of its available copies for the scenario members (`ExpiryFixtures`) |
 | Statuses in `Central` | 18,450 `AVAILABLE`, 1,000 `ON_LOAN` (with their loans), 500 `RESERVED` (with their reservations; 100 already expired, so the map shows 18,550 available), 50 `WITHDRAWN` | Shelf map |
 | Members | 60 scenario members (`member01@library.test`…) with no items; 500 readers (`reader001@library.test`…) who own Central's loans and reservations, at most 3 items each | Reservation, Member limit |
 | Copies in `North` | The **bestseller** (`N-BEST`, a single copy) and 30 ordinary available copies (`N0001`–`N0030`) | Reservation, Member limit |
@@ -180,7 +198,10 @@ flowchart LR
 | `ScenarioReport` (record) | Statements, entity loads, collection fetches, batches, median time, heap, bytes, outcome counts | Comparing naive and better with the same numbers |
 | `RaceWindow` | No-op in normal use; a `CyclicBarrier` in concurrency scenarios | Forcing a possible interleaving |
 | `ConcurrentRun` helper | 50 tasks on an `ExecutorService`, released by a `CountDownLatch` | Starting requests at the same instant |
-| `DemoReset` | Restores the rows a scenario uses (JPQL bulk deletes and updates) | Identical data for naive and better |
+| `DemoReset` | Restores the rows a scenario uses (JPQL bulk deletes and updates), including any copy of any branch held or lent by a scenario member | Identical data for naive and better |
+| `MovableClock` (the application's `Clock` bean) | The system clock, truncated to microseconds, unless a scenario stops it (`fixAt`) or moves it (`advance`) | Controllable time; Java and SQL compare at the same precision |
+| `TransitionPauses` | Named points in the services; a scenario arms one to **stop** a thread until resumed, make N threads **meet**, or make a thread **fail** | Forcing one specific interleaving, not just "everybody at once" |
+| `DemoClockController` | `GET`/`POST`/`DELETE /demo/clock?plusHours=…` | Showing expiry live from `scenarios.http` |
 
 ## 4. Lesson 1: Bulk import of a branch's copies
 
@@ -573,32 +594,100 @@ existing 4); copies locked only → both tabs succeed, 6 items; member locked �
 `MemberLimitExceededException`, 4 items; a member's first request accepted; the endpoint answers
 `409` with type `/problems/member-limit-exceeded`.
 
-## 9. Package layout
+## 9. Lesson 6: Reservation expiry, collection and return
+
+The full plan (stories, forced interleavings, code of both versions, concept coverage, design
+decisions, measured results) is [reservation-expiry-and-return.md](reservation-expiry-and-return.md).
+
+**Learned:** the invariant before the code, the time rule in the domain with `now` as a parameter,
+a controllable clock, lazy expiry vs a sweep, lost update between two transitions, the stale
+managed entity, scalar keys before arbitration, fresh time after the lock, lock order and deadlock,
+`SKIP LOCKED`, conditional updates and checked row counts, side effects after commit, bounded sweep,
+self-invocation, `fixedDelay`, idempotent retries.
+
+**Endpoints:** `POST /naive|better/reservations/{id}/collection` (body `{"memberEmail"}`, `200` with
+the loan ids), `DELETE /naive|better/reservations/{id}?memberEmail=` (`204`),
+`POST /naive|better/loans/{id}/return` (`200`, also on a retry), `GET /reservations/{id}` (`410`
+once the deadline has passed). `409 /problems/reservation-not-active` when the reservation has
+ended or expired. Expiry has no endpoint: `ExpirySweepScheduler` runs a bounded sweep with
+`fixedDelay` when `library.expiry.sweep-enabled=true` (off by default: Central's 100 expired
+reservations are an example of the shelf-map lesson).
+
+**Scenarios** (`ExpiryScenarios`; the drivers `ExpiryRaces` and `SweepRaces` take the operations as
+functions, so naive and better run the same rounds; clock 30 days in the past). Measured, one run
+over HTTP on a freshly started application:
+
+| Story | Naive | Better |
+| --- | --- | --- |
+| S1 one operation at a time (`expiry-boundary`) | every answer right | (same) |
+| S2 collect at the deadline while the sweep expires, both orderings × 10 | both succeed every round; Anna has a loan of a copy shown as available | A and B: exactly one winner, every fact agrees |
+| S3 a late cancel after a collection × 5 | `204`, copy back on the shelf, loan still open | `409` |
+| S4 late sweep after Bruno re-reserved | Bruno holds nothing; Clara gets the same copy | Bruno keeps it; Clara `409` |
+| S5 sweep and reservation, opposite lock orders × 5 | `40P01` deadlock | sweep skips (`SKIP LOCKED`), next run expires |
+| S6 two instances, 100 reservations | 200 notices | 100 |
+| S6b failure after the notice | a notice for an expiry that rolled back | none |
+| S7 backlog of 1,000 | 6.2–8.0 s, one transaction; a member's request times out (`503`); one failure: 0 expired, 501 notices | 12.4 s in 11 runs; the member waits 19 ms; one failure: retried, all expired |
+| S8 retried return with a reservation in between × 5 | Bruno's reservation erased | Bruno keeps the copy |
+
+| Piece of code | Concept learned |
+| --- | --- |
+| `Reservation.collect/expire/cancel(now)`, `isExpiredAt(now)`; `ExpirySweep` boundary tests at `expiresAt − 1 µs` and `expiresAt` | The rule in the domain, decided once, with `now` as a parameter |
+| `MovableClock`, truncated to microseconds | Controllable time; same precision in Java and SQL |
+| `NaiveExpiryTransitions`: `clock.instant()` first, `findById`, decide, dirty checking | Lost update between two transitions; time read too early |
+| `CopyRepository.lendOwned` whose count the naive collection ignores | An affected-row count you do not check is not a guarantee |
+| `NaiveExpiryTransitions.cancel`: `findById` then `ReservationRepository.lockById` | A lock does not refresh a managed entity |
+| `ReservationKey` / `transitionKey` (projection) before any lock | Scalars before arbitration, the entity only under the lock |
+| `LockingExpiryTransitions`: member → reservation → copies, clock after the locks | One row as referee; one lock order everywhere |
+| `CopiesFirstExpiryTransitions` (naive) | Opposite lock orders deadlock (`40P01`) |
+| `MemberRepository.lockIfFree`, `ReservationRepository.lockIfFree` (native `FOR UPDATE SKIP LOCKED`) | A background job never waits behind a user |
+| `ConditionalExpiryTransitions`: `collectIfLive`, `expireIfDue`, `@Modifying(clearAutomatically, flushAutomatically)` | Option B: the database decides by affected rows; the time rule written twice |
+| `Copy.releaseFrom` / `CopyRepository.releaseOwned` vs `Copy.makeAvailable` | Lazy expiry and the sweep must agree on who holds a copy |
+| `ExpiryNoticeListener` (`@TransactionalEventListener(AFTER_COMMIT)`) vs `ExpiryNotices.send` inside the transaction | Side effects after commit; at most once |
+| `ExpirySweep` (page of 100, `ix_reservation_expiry`, one transaction per candidate through another bean) vs `OneTransactionSweep` | Bounded batches; propagation `REQUIRED`; self-invocation |
+| `ExpirySweepScheduler` (`@Scheduled(fixedDelay)`, `@ConditionalOnProperty`) | `fixedDelay` vs `fixedRate`; tests never race the real timer |
+| `ConditionalLoanReturnService` (`closeIfOpen`, `shelveIfOnLoan`) vs `NaiveLoanReturnService` | Idempotent retry; Hibernate writes every column of a stale entity |
+
+**Example tests:** `ReservationExpiryTest`, `CopyCollectTest`, `LoanTest`, `MovableClockTest` (unit);
+`ExpiryTransitionTest` (sequential, naive, S1 and the sweep's page bound); `ExpiryRaceTest` (the
+mandatory test: both orderings × 10 on options A and B; it failed on the naive version first,
+`design/evidence/expiry-naive-race.log`); `ExpiryNaiveScenariosTest` (each naive scenario does its
+damage); `ExpiryBetterScenariosTest` (each better scenario keeps the invariant).
+
+## 10. Package layout
 
 ```text
 cat.tecnocampus.library
-├── (root)            LibraryApplication, ClockConfiguration
+├── (root)            LibraryApplication, ClockConfiguration, MovableClock
 ├── domain            Author, Book, Subject, Branch, Copy, Member, Loan, Reservation, MemberLimit, enums, exceptions
-├── persistence       Spring Data repositories, projection records (IsbnRef, BarcodeRef, BookRow, ShelfRow)
+├── persistence       Spring Data repositories, projection records (IsbnRef, BarcodeRef, BookRow, ShelfRow,
+│                     ReservationKey)
 ├── importing         CopyCsvParser, CopyRow, ImportResult, NaiveCopyImportService, BatchedCopyImportService,
 │                     ImportController
 ├── catalogue         NaiveCatalogueService, JoinFetchCatalogueService, ProjectionCatalogueService, CatalogueController
 ├── shelfmap          NaiveShelfMapService, ProjectedShelfMapService, ShelfMapController
 ├── reservation       NaiveReservationService, LockingReservationService, MemberLockingReservationService,
 │                     ReservationLookupService, ReservationController
+├── expiry            NaiveExpiryTransitions, LockingExpiryTransitions, ConditionalExpiryTransitions,
+│                     CopiesFirstExpiryTransitions, ReservationExpirer, ExpirySweep, OneTransactionSweep,
+│                     ExpirySweepScheduler, ExpiryNotice, ExpiryNotices, ExpiryNoticeListener, ExpiryController,
+│                     CollectionResponse, MemberRequest; scenarios: ExpiryScenarios, ExpiryRaces, SweepRaces,
+│                     ExpiryDemo, ExpiryFixtures
+├── loan              NaiveLoanReturnService, ConditionalLoanReturnService, LoanController, LoanResponse
 ├── web               ProblemDetailsHandler
 └── scenario          Scenario, ScenarioRegistry, ScenarioRunner, ScenarioController, ScenarioReport,
                       Measurement, JdbcExecutionCounter, SqlCounts, Measured, Timing,
-                      RaceWindow, ConcurrentRun, DemoReset, SimpleScenario
+                      RaceWindow, TransitionPauses, ConcurrentRun, DemoReset, DemoClockController,
+                      SimpleScenario
                       (each lesson's scenarios live in its package: CatalogueScenarios,
-                      ShelfMapScenarios, ImportScenarios, ReservationScenarios, MemberLimitScenarios)
+                      ShelfMapScenarios, ImportScenarios, ReservationScenarios, MemberLimitScenarios,
+                      ExpiryScenarios)
 ```
 
 Lessons 4 and 5 share the `reservation` package: the member limit is part of reserving.
 `LockingReservationService` is lesson 4's better version and lesson 5's naive version;
 `MemberLockingReservationService` is the same code with the member locked before the count.
 
-## 10. Demonstration order
+## 11. Demonstration order
 
 | Order | Lesson | Scenarios | Main number to show |
 | --- | --- | --- | --- |
@@ -607,6 +696,7 @@ Lessons 4 and 5 share the `reservation` package: the member limit is part of res
 | 3 | Import | naive (5,000) → batched (5,000 and 20,000) | 21.5 s → 0.28 s for the same 5,000 rows; 15,001 → 3 statements |
 | 4 | Reservation | naive → pessimistic, overlap naive → overlap pessimistic | 50 promises → 1; the loser's copy stays free |
 | 5 | Member limit | naive → locked | 6 items → 4 (limit 5) |
+| 6 | Expiry | boundary; then each naive → better pair, in the order of [the plan](reservation-expiry-and-return.md#10-demonstration-order) | both "collected" and "expired" → one winner; 200 notices → 100; a member waits 5 s and fails → 19 ms |
 
 The catalogue goes first because it introduces lazy loading and the persistence context, which
 the import and the shelf map build on. The numbers in this table were measured on one machine (Apple M3 Pro,

@@ -109,3 +109,101 @@ POST {{host}}/better/reservations/member-locked
 Content-Type: application/json
 
 {"memberEmail": "member53@library.test", "branch": "North", "barcodes": ["N0025", "N0026", "N0027", "N0028"]}
+
+### =============================================================================================
+### Expiry, collection and return (design/reservation-expiry-and-return.md). Run with the scheduled
+### sweep off (the default): the scenarios move the application's clock, 30 days into the past.
+### =============================================================================================
+
+### Expiry S1 — one operation at a time, 1 µs before the deadline and at it: all right, even naive
+POST {{host}}/scenarios/expiry-boundary
+
+### Expiry S2 — naive: collect and expire both succeed; the copy is in Anna's bag and on the shelf map
+POST {{host}}/scenarios/collect-expiry-naive
+
+### Expiry S2 — option A: member, reservation, copies locked; the clock read after the locks
+POST {{host}}/scenarios/collect-expiry-locked
+
+### Expiry S2 — option B: a conditional UPDATE on the reservation decides
+POST {{host}}/scenarios/collect-expiry-conditional
+
+### Expiry S3 — naive: a late cancel locks the row and still decides on the stale entity
+POST {{host}}/scenarios/cancel-stale-naive
+
+### Expiry S3 — better: scalar keys before the lock, the entity loaded under it: 409
+POST {{host}}/scenarios/cancel-locked
+
+### Expiry S4 — naive: the late sweep frees a copy Bruno reserved after the deadline
+POST {{host}}/scenarios/sweep-after-rereserve-naive
+
+### Expiry S4 — better: only the copies the reservation still holds are released
+POST {{host}}/scenarios/sweep-after-rereserve-owned
+
+### Expiry S5 — naive: the sweep locks in the opposite order: 40P01 deadlock (about 1 s per round)
+POST {{host}}/scenarios/sweep-deadlock-naive
+
+### Expiry S5 — better: one lock order everywhere, the sweep skips a busy member (SKIP LOCKED)
+POST {{host}}/scenarios/sweep-ordered
+
+### Expiry S6 — naive: two instances sweep the same 100 reservations: 200 notices
+POST {{host}}/scenarios/sweep-two-workers-naive
+
+### Expiry S6 — better: SKIP LOCKED, each reservation expired once, 100 notices
+POST {{host}}/scenarios/sweep-two-workers-skip-locked
+
+### Expiry S6b — naive: a notice sent, then the transaction rolls back
+POST {{host}}/scenarios/expiry-notice-rollback-naive
+
+### Expiry S6b — better: the notice is sent after the commit
+POST {{host}}/scenarios/expiry-notice-after-commit
+
+### Expiry S7 — naive: 1,000 expired reservations in one transaction (Bruno times out; one failure undoes all)
+# @timeout 300
+POST {{host}}/scenarios/sweep-one-transaction
+
+### Expiry S7 — better: pages of 100, one transaction each (slower in total; nobody waits)
+# @timeout 300
+POST {{host}}/scenarios/sweep-batched
+
+### Expiry S8 — naive: a retried return erases the reservation made in between
+POST {{host}}/scenarios/return-double-scan-naive
+
+### Expiry S8 — better: the loan row decides; the retry changes nothing
+POST {{host}}/scenarios/return-conditional
+
+### Expiry endpoints, live. 1. member03 reserves N0030 (keeps the id for the next requests)
+POST {{host}}/better/reservations/member-locked
+Content-Type: application/json
+
+{"memberEmail": "member03@library.test", "branch": "North", "barcodes": ["N0030"]}
+
+> {% client.global.set("reservationId", response.body.id); %}
+
+### 2. Read it: 200, ACTIVE
+GET {{host}}/reservations/{{reservationId}}
+
+### 3. Move the application's clock 48 hours forward
+POST {{host}}/demo/clock?plusHours=48
+
+### 4. Read it again: 410 Gone, although its row still says ACTIVE (lazy expiry on read)
+GET {{host}}/reservations/{{reservationId}}
+
+### 5. Collect it: 409 reservation-not-active
+POST {{host}}/better/reservations/{{reservationId}}/collection
+Content-Type: application/json
+
+{"memberEmail": "member03@library.test"}
+
+### 6. The clock back to the system clock
+DELETE {{host}}/demo/clock
+
+### 7. Collect it now: with the real clock back, its deadline is 48 h away again: 200 with the loan ids
+POST {{host}}/better/reservations/{{reservationId}}/collection
+Content-Type: application/json
+
+{"memberEmail": "member03@library.test"}
+
+> {% client.global.set("loanId", response.body.loanIds[0]); %}
+
+### 8. Return the copy; run it twice: the retry answers 200 with the same loan
+POST {{host}}/better/loans/{{loanId}}/return

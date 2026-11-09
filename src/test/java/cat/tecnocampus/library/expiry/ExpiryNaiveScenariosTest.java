@@ -36,12 +36,31 @@ class ExpiryNaiveScenariosTest {
     @Test
     void everyExpiryScenarioIsRegistered() {
         assertThat(registry.all()).filteredOn(s -> s.lesson().equals("expiry")).extracting("name")
-                .containsExactlyInAnyOrder("collect-expiry-naive", "cancel-stale-naive", "sweep-after-rereserve-naive",
+                .containsExactlyInAnyOrder("expiry-boundary", "collect-expiry-naive", "cancel-stale-naive", "sweep-after-rereserve-naive",
                         "sweep-deadlock-naive", "sweep-two-workers-naive", "expiry-notice-rollback-naive",
                         "sweep-one-transaction", "return-double-scan-naive",
                         "collect-expiry-locked", "collect-expiry-conditional", "cancel-locked",
                         "sweep-after-rereserve-owned", "sweep-ordered", "sweep-two-workers-skip-locked",
                         "expiry-notice-after-commit", "sweep-batched", "return-conditional");
+    }
+
+    @Test
+    void oneOperationAtATimeTheNaiveVersionGetsEveryBoundaryRight() {
+        java.util.Map<String, Object> steps = races.boundary(naive::collect, naive);
+
+        assertThat(steps).containsEntry("1 µs before: shelf map N0001", "shows RESERVED, stored RESERVED")
+                .containsEntry("1 µs before: GET reservation", "ACTIVE")
+                .containsEntry("1 µs before: collect N0001", "200 collected")
+                .containsEntry("at the deadline: shelf map N0002 (nothing swept yet)", "shows AVAILABLE, stored RESERVED")
+                .containsEntry("at the deadline: GET reservation", "410 gone")
+                .containsEntry("at the deadline: Anna's active items (1 loan)", 1L)
+                .containsEntry("at the deadline: collect N0002", "409 not active")
+                .containsEntry("at the deadline: sweep, first run", new ExpirySweep.SweepResult(1, 1, 0))
+                .containsEntry("at the deadline: sweep, second run", new ExpirySweep.SweepResult(0, 0, 0))
+                .containsEntry("a day later: sweep (the collected one is no candidate)", new ExpirySweep.SweepResult(0, 0, 0))
+                .containsEntry("a day later: shelf map N0001", "shows ON_LOAN, stored ON_LOAN");
+        assertThat(steps.get("facts of the expired reservation")).hasToString(
+                "reservation=EXPIRED copy=AVAILABLE (held by none) openLoans=0 activeItems=1 notices=1");
     }
 
     @Test
