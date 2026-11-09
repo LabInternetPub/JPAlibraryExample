@@ -102,9 +102,58 @@ public class Reservation {
         copies.forEach(copy -> copy.reserve(id, expiresAt, now));
     }
 
-    /** Live reservations count towards the member's limit; expired ones no longer do. */
+    /**
+     * Live reservations count towards the member's limit; expired ones no longer do.
+     *
+     * <p>The time rule of the expiry lesson, decided once: live while {@code now < expiresAt}. At
+     * exactly {@code expiresAt} the reservation can be expired and can no longer be collected or
+     * cancelled. There is no instant at which both are allowed, and none at which neither is.
+     */
     public boolean isLiveAt(Instant now) {
         return status == ReservationStatus.ACTIVE && now.isBefore(expiresAt);
+    }
+
+    /**
+     * The member is at the desk: the reservation becomes {@code COLLECTED}. Only the status changes
+     * here; the copies go on loan through {@link Copy#collect(UUID, Instant)} and
+     * {@link Loan#forCollection(Member, Copy, Instant)}, in the same transaction.
+     *
+     * <p>Correct as a rule, but only as reliable as the read that loaded this object: decided on a
+     * stale {@code ACTIVE}, it happily overwrites an expiry that another transaction has committed.
+     */
+    public void collect(Instant now) {
+        if (!isLiveAt(now)) {
+            throw new ReservationNotActiveException(id);
+        }
+        status = ReservationStatus.COLLECTED;
+    }
+
+    /**
+     * Stores the expiry of a reservation whose deadline has passed.
+     *
+     * @return true only for the one caller that must release the copies and send the notice;
+     *         false if the reservation is not due yet or has already left {@code ACTIVE}
+     */
+    public boolean expire(Instant now) {
+        if (status != ReservationStatus.ACTIVE || now.isBefore(expiresAt)) {
+            return false;
+        }
+        status = ReservationStatus.EXPIRED;
+        return true;
+    }
+
+    /**
+     * The member gives the reservation up before it expires. Another member's reservation is
+     * answered as not found, so its existence is not revealed.
+     */
+    public void cancel(UUID memberId, Instant now) {
+        if (!member.getId().equals(memberId)) {
+            throw new NotFoundException("Reservation", id);
+        }
+        if (!isLiveAt(now)) {
+            throw new ReservationNotActiveException(id);
+        }
+        status = ReservationStatus.CANCELLED;
     }
 
     public UUID getId() {

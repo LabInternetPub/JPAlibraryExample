@@ -3,6 +3,7 @@ package cat.tecnocampus.library.web;
 import cat.tecnocampus.library.domain.CopiesUnavailableException;
 import cat.tecnocampus.library.domain.MemberLimitExceededException;
 import cat.tecnocampus.library.domain.NotFoundException;
+import cat.tecnocampus.library.domain.ReservationNotActiveException;
 import cat.tecnocampus.library.importing.InvalidImportFileException;
 import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
@@ -45,6 +46,14 @@ public class ProblemDetailsHandler {
                 e.getMessage());
         problem.setProperty("activeItems", e.getExisting());
         problem.setProperty("requested", e.getRequested());
+        return problem;
+    }
+
+    @ExceptionHandler(ReservationNotActiveException.class)
+    ProblemDetail reservationNotActive(ReservationNotActiveException e) {
+        ProblemDetail problem = problem(HttpStatus.CONFLICT, "reservation-not-active", "Reservation not active",
+                "The reservation has expired, or was already collected or cancelled");
+        problem.setProperty("reservationId", e.getReservationId());
         return problem;
     }
 

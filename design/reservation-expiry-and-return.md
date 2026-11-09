@@ -40,7 +40,12 @@ operations on the same reservation** (or the same loan). Fixing lessons 4 and 5 
 | `Reservation.cancel(member, now)` → `CANCELLED`; throws unless live and owned | `Reservation` | Release by the member |
 | `Copy.collect(reservationId, now)`: `RESERVED` by **this** reservation and before `reservedUntil` → `ON_LOAN` | `Copy` | `Copy.lend(now)` refuses a reserved copy, even for its own reservation |
 | `Copy.releaseFrom(reservationId)`: back to `AVAILABLE` only if it is still held by that reservation | `Copy` | A late sweep must not free a copy that another reservation took (scenario S4) |
-| `Loan.giveBack(now)` returns whether this call closed the loan | `Loan` | Idempotent return (scenario S8) |
+| `Copy.collect` and `releaseFrom` refuse with `CopiesUnavailableException` / return `false`; `ReservationNotActiveException` → `409 /problems/reservation-not-active` | `Copy`, `ProblemDetailsHandler` | Clean rejections |
+| `Loan.forCollection(member, copy, now)`: records a copy already put on loan, without calling `Copy.lend` again | `Loan` | Collection (S2) |
+| `Loan.giveBack(now)` returns whether this call closed the loan, and records `returnedAt`; a second call is a no-op, not an exception | `Loan` | Idempotent return (scenario S8) |
+
+**Status:** stage 1 is implemented (`MovableClock`, the changes above, and the unit tests
+`ReservationExpiryTest`, `CopyCollectTest`, `LoanTest`, `MovableClockTest`).
 
 The boundary is decided once, as in Affora: a reservation is live while `now < expiresAt`. At
 `expiresAt − 1 ns` collecting succeeds; at `expiresAt` collecting fails and expiring succeeds.

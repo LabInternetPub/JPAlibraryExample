@@ -111,6 +111,42 @@ public class Copy {
         this.reservedUntil = null;
     }
 
+    /**
+     * The reservation that holds this copy is collected: the copy goes on loan. Only the
+     * reservation that holds it, and only before its deadline; {@link #lend(Instant)} cannot be
+     * used here, because it refuses a reserved copy even to the reservation that holds it.
+     *
+     * <p>Clearing {@code reservedUntil} removes the deadline: a collected copy can never look
+     * expired to the shelf map or to a new reservation. The loan's due date replaces it.
+     */
+    public void collect(UUID reservationId, Instant now) {
+        if (status != CopyStatus.RESERVED || !Objects.equals(this.reservationId, reservationId)
+                || !now.isBefore(reservedUntil)) {
+            throw new CopiesUnavailableException(List.of(id));
+        }
+        this.status = CopyStatus.ON_LOAN;
+        this.reservationId = null;
+        this.reservedUntil = null;
+    }
+
+    /**
+     * An expired or cancelled reservation gives the copy back, but only if the copy is still
+     * held by that reservation. After its deadline, another reservation may already have taken it
+     * (see {@link #isAvailableAt(Instant)}): that one must keep it.
+     *
+     * @return true if this call made the copy available; false (not an error) if the copy no
+     *         longer belongs to that reservation
+     */
+    public boolean releaseFrom(UUID reservationId) {
+        if (status != CopyStatus.RESERVED || !Objects.equals(this.reservationId, reservationId)) {
+            return false;
+        }
+        this.status = CopyStatus.AVAILABLE;
+        this.reservationId = null;
+        this.reservedUntil = null;
+        return true;
+    }
+
     public void returnToShelf() {
         if (status != CopyStatus.ON_LOAN) {
             throw new IllegalStateException("Only a copy on loan can be returned");
