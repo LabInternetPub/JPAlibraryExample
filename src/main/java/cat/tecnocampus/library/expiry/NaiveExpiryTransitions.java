@@ -8,6 +8,7 @@ import cat.tecnocampus.library.domain.Reservation;
 import cat.tecnocampus.library.domain.ReservationStatus;
 import cat.tecnocampus.library.persistence.CopyRepository;
 import cat.tecnocampus.library.persistence.ReservationRepository;
+import cat.tecnocampus.library.scenario.TransitionPauses;
 import jakarta.persistence.EntityManager;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -47,14 +48,17 @@ public class NaiveExpiryTransitions implements ReservationExpirer {
     private final CopyRepository copies;
     private final EntityManager entityManager;
     private final ExpiryNotices notices;
+    private final TransitionPauses pauses;
     private final Clock clock;
 
     public NaiveExpiryTransitions(ReservationRepository reservations, CopyRepository copies,
-                                  EntityManager entityManager, ExpiryNotices notices, Clock clock) {
+                                  EntityManager entityManager, ExpiryNotices notices, TransitionPauses pauses,
+                                  Clock clock) {
         this.reservations = reservations;
         this.copies = copies;
         this.entityManager = entityManager;
         this.notices = notices;
+        this.pauses = pauses;
         this.clock = clock;
     }
 
@@ -64,7 +68,9 @@ public class NaiveExpiryTransitions implements ReservationExpirer {
         Reservation reservation = reservations.findById(reservationId)      // (2) plain read, no lock
                 .filter(r -> r.getMember().getId().equals(memberId))
                 .orElseThrow(() -> new NotFoundException("Reservation", reservationId));
+        pauses.observe(TransitionPauses.COLLECT_READ, reservationId);
         reservation.collect(now);                                            // (3) decided in Java
+        pauses.observe(TransitionPauses.COLLECT_VALIDATED, reservationId);
         List<UUID> copyIds = reservation.getCopyIds();   // before the bulk update clears the context
 
         copies.lendOwned(reservationId);                                     // (4) count ignored
@@ -83,12 +89,14 @@ public class NaiveExpiryTransitions implements ReservationExpirer {
     public boolean expire(UUID reservationId) {
         Instant now = clock.instant();
         Reservation reservation = reservations.findById(reservationId).orElse(null);   // plain read
+        pauses.observe(TransitionPauses.EXPIRY_READ, reservationId);
         if (reservation == null || !reservation.expire(now)) {                           // decided in Java
             return false;
         }
         List<Copy> held = copies.findAllById(reservation.getCopyIds());
         held.forEach(Copy::makeAvailable);                // whoever holds them now
         notices.send(notice(reservation, held));          // sent before the commit
+        pauses.observe(TransitionPauses.EXPIRY_NOTIFIED, reservationId);   // anything failing from here rolls back
         return true;
     }
 
@@ -96,6 +104,7 @@ public class NaiveExpiryTransitions implements ReservationExpirer {
     public void cancel(UUID memberId, UUID reservationId) {
         Reservation reservation = reservations.findById(reservationId)      // the entity, loaded now
                 .orElseThrow(() -> new NotFoundException("Reservation", reservationId));
+        pauses.observe(TransitionPauses.CANCEL_READ, reservationId);
         // "Add a lock": SELECT ... FOR UPDATE really waits for a concurrent collection, but it hands
         // back the object above, with the status it had before waiting.
         reservations.lockById(reservationId);

@@ -9,6 +9,7 @@ import cat.tecnocampus.library.persistence.CopyRepository;
 import cat.tecnocampus.library.persistence.MemberRepository;
 import cat.tecnocampus.library.persistence.ReservationRepository;
 import cat.tecnocampus.library.scenario.RaceWindow;
+import cat.tecnocampus.library.scenario.TransitionPauses;
 import jakarta.persistence.EntityManager;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -38,16 +39,18 @@ public class MemberLockingReservationService {
     private final ReservationRepository reservations;
     private final EntityManager entityManager;
     private final RaceWindow raceWindow;
+    private final TransitionPauses pauses;
     private final Clock clock;
 
     public MemberLockingReservationService(MemberRepository members, CopyRepository copies,
                                            ReservationRepository reservations, EntityManager entityManager,
-                                           RaceWindow raceWindow, Clock clock) {
+                                           RaceWindow raceWindow, TransitionPauses pauses, Clock clock) {
         this.members = members;
         this.copies = copies;
         this.reservations = reservations;
         this.entityManager = entityManager;
         this.raceWindow = raceWindow;
+        this.pauses = pauses;
         this.clock = clock;
     }
 
@@ -62,6 +65,9 @@ public class MemberLockingReservationService {
         Member member = members.lockById(memberId).orElseThrow(() -> new NotFoundException("Member", memberId));
         // COUNT while holding it: no other request of this member can add items meanwhile.
         MemberLimit.check(reservations.countActiveItems(memberId, now), copyIds.size());
+        // Holding the member lock, before the copies: the expiry lesson stops here to show a deadlock
+        // with a sweep that locks the same rows in the opposite order.
+        pauses.observe(TransitionPauses.RESERVE_MEMBER_LOCKED, memberId);
 
         List<Copy> locked = copies.lockCopies(copyIds);
         Reservation.checkAvailable(copyIds, locked, now);

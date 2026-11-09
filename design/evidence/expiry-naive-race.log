@@ -1,0 +1,28 @@
+[expiry collection first] collect=200 collected expire=true | reservation=EXPIRED copy=AVAILABLE (held by none) openLoans=1 activeItems=1 notices=1
+[expiry collection first] collect=200 collected expire=true | reservation=EXPIRED copy=AVAILABLE (held by none) openLoans=1 activeItems=1 notices=1
+[expiry collection first] collect=200 collected expire=true | reservation=EXPIRED copy=AVAILABLE (held by none) openLoans=1 activeItems=1 notices=1
+[expiry collection first] collect=200 collected expire=true | reservation=EXPIRED copy=AVAILABLE (held by none) openLoans=1 activeItems=1 notices=1
+[expiry collection first] collect=200 collected expire=true | reservation=EXPIRED copy=AVAILABLE (held by none) openLoans=1 activeItems=1 notices=1
+[expiry collection first] collect=200 collected expire=true | reservation=EXPIRED copy=AVAILABLE (held by none) openLoans=1 activeItems=1 notices=1
+[expiry collection first] collect=200 collected expire=true | reservation=EXPIRED copy=AVAILABLE (held by none) openLoans=1 activeItems=1 notices=1
+[expiry expiry first] collect=200 collected expire=true | reservation=COLLECTED copy=AVAILABLE (held by none) openLoans=1 activeItems=1 notices=1
+[expiry expiry first] collect=200 collected expire=true | reservation=COLLECTED copy=AVAILABLE (held by none) openLoans=1 activeItems=1 notices=1
+[expiry expiry first] collect=200 collected expire=true | reservation=COLLECTED copy=AVAILABLE (held by none) openLoans=1 activeItems=1 notices=1
+[expiry expiry first] collect=200 collected expire=true | reservation=COLLECTED copy=AVAILABLE (held by none) openLoans=1 activeItems=1 notices=1
+[expiry expiry first] collect=200 collected expire=true | reservation=COLLECTED copy=AVAILABLE (held by none) openLoans=1 activeItems=1 notices=1
+[expiry expiry first] collect=200 collected expire=true | reservation=COLLECTED copy=AVAILABLE (held by none) openLoans=1 activeItems=1 notices=1
+[expiry expiry first] collect=200 collected expire=true | reservation=COLLECTED copy=AVAILABLE (held by none) openLoans=1 activeItems=1 notices=1
+[expiry expiry first] collect=200 collected expire=true | reservation=COLLECTED copy=AVAILABLE (held by none) openLoans=1 activeItems=1 notices=1
+[expiry expiry first] collect=200 collected expire=true | reservation=COLLECTED copy=AVAILABLE (held by none) openLoans=1 activeItems=1 notices=1
+[expiry expiry first] collect=200 collected expire=true | reservation=COLLECTED copy=AVAILABLE (held by none) openLoans=1 activeItems=1 notices=1
+[ERROR] Tests run: 2, Failures: 2, Errors: 0, Skipped: 0, Time elapsed: 2.767 s <<< FAILURE! -- in cat.tecnocampus.library.expiry.ExpiryRaceTest
+[ERROR] cat.tecnocampus.library.expiry.ExpiryRaceTest.whenCollectionCommitsFirstItWinsAndExpiryChangesNothing -- Time elapsed: 1.376 s <<< FAILURE!
+	at cat.tecnocampus.library.expiry.ExpiryRaceTest.whenCollectionCommitsFirstItWinsAndExpiryChangesNothing(ExpiryRaceTest.java:33)
+[ERROR] cat.tecnocampus.library.expiry.ExpiryRaceTest.whenExpiryCommitsFirstItWinsAndCollectionIsRefused -- Time elapsed: 1.373 s <<< FAILURE!
+	at cat.tecnocampus.library.expiry.ExpiryRaceTest.whenExpiryCommitsFirstItWinsAndCollectionIsRefused(ExpiryRaceTest.java:41)
+[ERROR]   ExpiryRaceTest.whenCollectionCommitsFirstItWinsAndExpiryChangesNothing:33 
+[ERROR]   ExpiryRaceTest.whenExpiryCommitsFirstItWinsAndCollectionIsRefused:41 
+-------------------------------------------------------------------------------
+Test set: cat.tecnocampus.library.expiry.ExpiryRaceTest
+-------------------------------------------------------------------------------
+Tests run: 2, Failures: 2, Errors: 0, Skipped: 0, Time elapsed: 2.767 s <<< FAILURE! -- in cat.tecnocampus.library.expiry.ExpiryRaceTest

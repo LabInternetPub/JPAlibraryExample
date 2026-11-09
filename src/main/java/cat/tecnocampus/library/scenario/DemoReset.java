@@ -42,6 +42,15 @@ public class DemoReset {
         // A subquery, not r.member.email: with an implicit join, Hibernate's cleanup of the
         // element-collection table references a join it does not declare, and PostgreSQL refuses it.
         String scenarioMembers = "(select m.id from Member m where m.email like 'member%@library.test')";
+        // The expiry scenarios also reserve and lend copies of Central: give those back first,
+        // without touching the copies held by Central's own readers.
+        entityManager.createQuery("""
+                        update Copy c set c.status = cat.tecnocampus.library.domain.CopyStatus.AVAILABLE,
+                            c.reservationId = null, c.reservedUntil = null
+                        where c.reservationId in (select r.id from Reservation r where r.member.id in %s)
+                           or c.id in (select l.copy.id from Loan l where l.returned = false and l.member.id in %s)
+                        """.formatted(scenarioMembers, scenarioMembers))
+                .executeUpdate();
         entityManager.createQuery("delete from Reservation r where r.member.id in " + scenarioMembers)
                 .executeUpdate();
         entityManager.createQuery("delete from Loan l where l.member.id in " + scenarioMembers)

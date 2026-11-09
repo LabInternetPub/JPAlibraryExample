@@ -3,6 +3,7 @@ package cat.tecnocampus.library.loan;
 import cat.tecnocampus.library.domain.Loan;
 import cat.tecnocampus.library.domain.NotFoundException;
 import cat.tecnocampus.library.persistence.LoanRepository;
+import cat.tecnocampus.library.scenario.TransitionPauses;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -23,17 +24,21 @@ import java.util.UUID;
 public class NaiveLoanReturnService {
 
     private final LoanRepository loans;
+    private final TransitionPauses pauses;
     private final Clock clock;
 
-    public NaiveLoanReturnService(LoanRepository loans, Clock clock) {
+    public NaiveLoanReturnService(LoanRepository loans, TransitionPauses pauses, Clock clock) {
         this.loans = loans;
+        this.pauses = pauses;
         this.clock = clock;
     }
 
     @Transactional
     public LoanResponse giveBack(UUID loanId) {
         Loan loan = loans.findById(loanId).orElseThrow(() -> new NotFoundException("Loan", loanId));
-        loan.giveBack(clock.instant());                  // the copy is loaded here, without a lock
+        loan.getCopy().getStatus();                      // the copy is loaded here, without a lock
+        pauses.observe(TransitionPauses.RETURN_READ, loanId);
+        loan.giveBack(clock.instant());
         return LoanResponse.from(loan);
     }
 }

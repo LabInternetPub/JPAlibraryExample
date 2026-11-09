@@ -70,6 +70,51 @@ It is the "keep the boundary identical in both places" rule of option B, one lev
 comparison, at the same precision. In scenarios, "one nanosecond before the deadline" is therefore
 one microsecond before it.
 
+**Stage 3 is implemented** (pause points and the naive scenarios):
+
+| Piece | Where |
+| --- | --- |
+| `TransitionPauses`: `stopAt(stage, key)` (one thread stops until resumed), `meetAt(stage, n)` (n threads meet, one stage only), `failAt(stage, key)` (throws there). Stages: `collect-read`, `collect-validated`, `expiry-read`, `expiry-copies-locked`, `expiry-notified`, `cancel-read`, `return-read`, `reserve-member-locked`, `sweep-candidates-read` | `scenario` |
+| `CopiesFirstExpiryTransitions` (S5: right in everything except the lock order), `OneTransactionSweep` (S7) | `expiry` |
+| `ExpiryDemo` (fresh start, threads, outcomes, facts), `ExpiryFixtures` (hundreds of reservations on Central), `ExpiryRaces` (S2, S3, S4, S5, S8), `SweepRaces` (S6, S6b, S7): the drivers take the operations as functions, so stage 4 reuses them | `expiry` |
+| `ExpiryScenarios`: eight scenarios, lesson `expiry` | `expiry` |
+| `DemoClockController`: `GET/POST/DELETE /demo/clock?plusHours=…` | `scenario` |
+| `ExpiryNaiveScenariosTest` (each naive scenario does the damage it claims), `ExpiryRaceTest` (the mandatory test; fails on naive, captured in `design/evidence/expiry-naive-race.log`, then `@Disabled`) | tests |
+
+Decisions taken in stage 3:
+
+- **The scheduled sweep is off by default** (`library.expiry.sweep-enabled=false`). Central's example
+  data has 100 reservations already expired but stored as `RESERVED`, which the shelf-map lesson
+  shows as available; a background sweep erased that example a minute after the start.
+- **Scenarios run 30 days in the past.** `ExpiryDemo.start()` fixes the clock 30 days back, so a
+  scenario's sweep never reaches Central's example reservations (checked after running all eight:
+  500 `RESERVED`, 100 of them expired, every reader reservation still `ACTIVE`).
+- **S5 uses stop points, not `RaceWindow`.** A second `RaceWindow` call inside
+  `MemberLockingReservationService` would break lesson 5 (a thread holding the member lock would
+  wait at the barrier for threads waiting for that lock).
+- **S6 uses 100 reservations** (one page), and the notice-then-rollback case is its own scenario,
+  `expiry-notice-rollback-naive`. **S7 uses a backlog of 1,000.**
+- `DemoReset.resetNorthAndScenarioMembers` now also releases the copies (any branch) held or lent
+  by scenario members.
+
+**Measured** (one run of the eight scenarios over HTTP on a freshly started application, Apple M3
+Pro; reports in `design/evidence/expiry-naive-scenarios.json`):
+
+| Scenario | Rounds | Result, every round |
+| --- | --- | --- |
+| `collect-expiry-naive`, collection first | 10 | collect `200`, expire `true`; `EXPIRED`, copy `AVAILABLE`, 1 open loan, 1 notice |
+| `collect-expiry-naive`, expiry first | 10 | collect `200`, expire `true`; `COLLECTED`, copy `AVAILABLE`, 1 open loan, 1 notice |
+| `cancel-stale-naive` | 5 | cancel `204`, collect `200`; `CANCELLED`, copy `AVAILABLE`, 1 open loan |
+| `sweep-after-rereserve-naive` | 1 | Anna `EXPIRED`, Bruno `ACTIVE` but holding nothing, Clara `201`: 2 live promises for N0002 |
+| `sweep-deadlock-naive` | 5 | the sweep aborted with `40P01` every time; Anna's reservation `201` |
+| `sweep-two-workers-naive` | 100 reservations | `expire()` true 200 times, 100 stored `EXPIRED`, **200 notices**, every member notified twice |
+| `expiry-notice-rollback-naive` | 3 reservations | 2 expired, 1 failed and still `ACTIVE`, 3 notices: 1 member told about an expiry that did not happen |
+| `sweep-one-transaction` | 1,000 reservations | 8.0 s, 3,061 statements + 1,999 batches, 2,060 entities loaded, 94 MB heap peak. Bruno, reserving a released copy during the sweep, **hit the 5 s lock timeout** (`55P03` → `503`). One failure in the middle: **0 expired, 501 notices sent** |
+| `return-double-scan-naive` | 5 | both returns `200`, Bruno `201` in between, his reservation `ACTIVE` but the copy not his; Clara `201` |
+
+In S7 the prediction was "Bruno waits for the whole sweep". He waits up to the lock timeout and then
+gets `503`: the sweep (8 s) holds the copy longer than any request is allowed to wait.
+
 The boundary is decided once, as in Affora: a reservation is live while `now < expiresAt`. At
 `expiresAt − 1 ns` collecting succeeds; at `expiresAt` collecting fails and expiring succeeds.
 There is no instant at which both are allowed, and none at which neither is.
@@ -120,12 +165,12 @@ must own its loans **and** its copies after everything has committed.
 | Index `ix_reservation_expiry (status, expires_at)` | Makes the candidate query an index range scan | Bounded, cheap sweep |
 | `ProblemDetailsHandler` | `ReservationNotActiveException` → `409 /problems/reservation-not-active`; `GET /reservations/{id}` → `410 Gone` once `now ≥ expiresAt` | Clean rejections; lazy expiry on read |
 
-The scheduler is **disabled in tests** (`library.expiry.sweep-enabled=false`, with a test that asserts
-the bean is absent) and when the class runs the scenarios: scenarios move the clock, and a timer
-running behind them would expire their fixtures at an unpredictable moment. Scenarios call
-`sweepOnce()` themselves. To show the real timer, start the application with the sweep enabled and
-`library.expiry.sweep-delay=5000`, create a reservation, move the clock with
-`POST /scenarios/clock?plusHours=48`, and watch the console.
+The scheduler is **off by default** (`library.expiry.sweep-enabled=false`) and in tests (a test
+asserts the bean is absent): scenarios move the clock, and a timer running behind them would expire
+their fixtures at an unpredictable moment; it would also expire Central's example reservations that
+the shelf-map lesson relies on. Scenarios call `sweepOnce()` themselves. To show the real timer, start
+the application with `--library.expiry.sweep-enabled=true --library.expiry.sweep-delay=5000`, create a
+reservation, move the clock with `POST /demo/clock?plusHours=48`, and watch the console.
 
 ---
 

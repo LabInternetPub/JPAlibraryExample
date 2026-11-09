@@ -1,6 +1,7 @@
 package cat.tecnocampus.library.expiry;
 
 import cat.tecnocampus.library.persistence.ReservationRepository;
+import cat.tecnocampus.library.scenario.TransitionPauses;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.domain.PageRequest;
@@ -31,20 +32,29 @@ public class ExpirySweep {
     private final ReservationExpirer expirer;
     private final Clock clock;
     private final int pageSize;
+    private final TransitionPauses pauses;
 
     public ExpirySweep(ReservationRepository reservations, ReservationExpirer expirer, Clock clock) {
         this(reservations, expirer, clock, PAGE_SIZE);
     }
 
     public ExpirySweep(ReservationRepository reservations, ReservationExpirer expirer, Clock clock, int pageSize) {
+        this(reservations, expirer, clock, pageSize, new TransitionPauses());
+    }
+
+    /** With the application's pause points, so a scenario can make two sweeps meet. */
+    public ExpirySweep(ReservationRepository reservations, ReservationExpirer expirer, Clock clock, int pageSize,
+                       TransitionPauses pauses) {
         this.reservations = Objects.requireNonNull(reservations);
         this.expirer = Objects.requireNonNull(expirer);
         this.clock = Objects.requireNonNull(clock);
         this.pageSize = pageSize;
+        this.pauses = Objects.requireNonNull(pauses);
     }
 
     public SweepResult sweepOnce() {
         List<UUID> candidates = reservations.findExpiredIds(clock.instant(), PageRequest.of(0, pageSize));
+        pauses.observe(TransitionPauses.SWEEP_CANDIDATES_READ, null);
         int expired = 0;
         int failed = 0;
         for (UUID id : candidates) {
