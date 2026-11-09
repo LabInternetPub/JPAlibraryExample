@@ -25,4 +25,14 @@ public interface MemberRepository extends JpaRepository<Member, UUID> {
     @QueryHints(@QueryHint(name = "jakarta.persistence.lock.timeout", value = "5000"))
     @Query("select m from Member m where m.id = :id")
     Optional<Member> lockById(@Param("id") UUID id);
+
+    /**
+     * The sweep's version: {@code FOR UPDATE SKIP LOCKED}. Empty if the member's row is locked
+     * (the member is reserving or collecting right now): the sweep skips that reservation and a
+     * later run sees it again. The member never waits behind the sweep. Native SQL: JPQL has no
+     * portable "skip locked". (NOWAIT would throw instead, and a failed statement aborts the whole
+     * PostgreSQL transaction.)
+     */
+    @Query(value = "select * from member where id = :id for update skip locked", nativeQuery = true)
+    Optional<Member> lockIfFree(@Param("id") UUID id);
 }

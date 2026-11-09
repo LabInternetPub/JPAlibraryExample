@@ -13,8 +13,9 @@ import java.time.Clock;
 
 /**
  * The scheduled process of the requirements: every {@code library.expiry.sweep-delay} ms, one
- * {@link ExpirySweep} run with the naive transitions (stage 2 of the lesson; the better ones
- * replace them later).
+ * {@link ExpirySweep} run with {@link LockingExpiryTransitions}: each expiry in its own
+ * transaction, skipping any reservation whose member or row is locked right now, so two
+ * application instances can sweep at the same time and each reservation expires once.
  *
  * <p>{@code fixedDelay}: the delay counts from the end of the previous run, so a slow run is never
  * followed immediately by the next one. It prevents overlap inside this scheduler only: two
@@ -35,7 +36,7 @@ public class ExpirySweepScheduler {
 
     private final ExpirySweep sweep;
 
-    public ExpirySweepScheduler(ReservationRepository reservations, NaiveExpiryTransitions transitions,
+    public ExpirySweepScheduler(ReservationRepository reservations, LockingExpiryTransitions transitions,
                                 TransitionPauses pauses, Clock clock) {
         this.sweep = new ExpirySweep(reservations, transitions, clock, ExpirySweep.PAGE_SIZE, pauses);
     }

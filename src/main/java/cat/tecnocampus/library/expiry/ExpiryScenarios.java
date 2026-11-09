@@ -1,5 +1,6 @@
 package cat.tecnocampus.library.expiry;
 
+import cat.tecnocampus.library.loan.ConditionalLoanReturnService;
 import cat.tecnocampus.library.loan.NaiveLoanReturnService;
 import cat.tecnocampus.library.scenario.Scenario;
 import cat.tecnocampus.library.scenario.ScenarioReport;
@@ -192,6 +193,173 @@ class ExpiryScenarios {
                                 + "of its stale Copy (status, reservation_id, reserved_until), not only the ones "
                                 + "that changed: Bruno's reservation lost the copy.")
                         .note("Bruno's reservation is ACTIVE and holds nothing, so Clara got the copy too.")
+                        .build());
+    }
+
+    // ---- the better versions --------------------------------------------------------------------
+
+    @Bean
+    Scenario collectExpiryLocked(LockingExpiryTransitions locking) {
+        return new SimpleScenario("collect-expiry-locked", LESSON,
+                "S2, option A: the same two orderings; member, reservation and copies locked, clock read after",
+                scenario -> collectExpiry(scenario, locking::collect, locking)
+                        .note("Exactly one winner in every round, and every fact agrees with it.")
+                        .note("The reservation is loaded for the first time under its lock (SELECT ... FOR UPDATE "
+                                + "in the SQL log) and the clock is read after the lock: the second transaction to "
+                                + "arrive sees the first one's committed status, and the domain rule refuses it.")
+                        .build());
+    }
+
+    @Bean
+    Scenario collectExpiryConditional(ConditionalExpiryTransitions conditional) {
+        return new SimpleScenario("collect-expiry-conditional", LESSON,
+                "S2, option B: the same two orderings; a conditional UPDATE on the reservation decides",
+                scenario -> collectExpiry(scenario, conditional::collect, conditional)
+                        .note("UPDATE reservation SET status=... WHERE id=? AND status='ACTIVE' AND expires_at > ?: "
+                                + "1 row, this transaction won; 0 rows, someone else decided first.")
+                        .note("The second UPDATE waits for the first one's row lock, then PostgreSQL re-evaluates "
+                                + "the WHERE on the committed row. The time rule now lives in Java and in the query.")
+                        .build());
+    }
+
+    private ScenarioReport.Builder collectExpiry(Scenario scenario, ExpiryRaces.Collect collect,
+                                                 ReservationExpirer expirer) {
+        var collectionFirst = rounds(ROUNDS, () -> races.collectionCommitsFirst(collect, expirer));
+        var expiryFirst = rounds(ROUNDS, () -> races.expiryCommitsFirst(collect, expirer));
+        return ScenarioReport.of(scenario)
+                .result("rounds per ordering", ROUNDS)
+                .result("required, collection commits first", REQUIRED_COLLECTION_FIRST)
+                .result("measured, collection commits first", ExpiryRaces.tally(collectionFirst))
+                .result("required, expiry commits first", REQUIRED_EXPIRY_FIRST)
+                .result("measured, expiry commits first", ExpiryRaces.tally(expiryFirst));
+    }
+
+    @Bean
+    Scenario cancelLocked(LockingExpiryTransitions locking) {
+        return new SimpleScenario("cancel-locked", LESSON,
+                "S3, better: the late cancel reads only scalar keys before its locks",
+                scenario -> ScenarioReport.of(scenario)
+                        .result("rounds", SHORT_ROUNDS)
+                        .result("measured", ExpiryRaces.tally(rounds(SHORT_ROUNDS,
+                                () -> races.staleCancel(locking::cancel, locking::collect))))
+                        .note("Before the lock it reads a projection (reservation id, member id), not the entity: "
+                                + "the persistence context stays empty, and the Reservation is loaded for the first "
+                                + "time under the lock, with the committed COLLECTED status. 409, nothing changes.")
+                        .build());
+    }
+
+    @Bean
+    Scenario sweepAfterRereserveOwned(LockingExpiryTransitions locking) {
+        return new SimpleScenario("sweep-after-rereserve-owned", LESSON,
+                "S4, better: the late sweep releases only the copies Anna's reservation still holds",
+                scenario -> {
+                    ExpiryRaces.LateSweep late = races.lateSweep(locking);
+                    return ScenarioReport.of(scenario)
+                            .result("sweep", late.sweep())
+                            .result("Anna's reservation", late.anna())
+                            .result("Bruno's reservation", late.bruno())
+                            .result("copy N0002", late.copy() + ", held by " + late.copyHeldBy())
+                            .result("Clara asks for N0002", late.claraReserves())
+                            .result("live reservations promising N0002", late.liveReservationsOfTheCopy())
+                            .note("Copy.releaseFrom(anna) answers false: the copy belongs to Bruno now. That is not "
+                                    + "an error, it is lazy expiry and the sweep agreeing.")
+                            .build();
+                });
+    }
+
+    @Bean
+    Scenario sweepOrdered(LockingExpiryTransitions locking) {
+        return new SimpleScenario("sweep-ordered", LESSON,
+                "S5, better: one lock order everywhere (member, reservation, copies) and a sweep that never waits",
+                scenario -> ScenarioReport.of(scenario)
+                        .result("rounds", SHORT_ROUNDS)
+                        .result("measured", ExpiryRaces.tally(rounds(SHORT_ROUNDS, () -> races.deadlock(locking))))
+                        .note("No deadlock: the sweep asks for the member first, finds it locked by Anna's request "
+                                + "(SKIP LOCKED) and skips the reservation at once. Anna never waits.")
+                        .note("Skipping is safe: the old reservation stays ACTIVE and expired in the database, and "
+                                + "the next run (expireAgain) expires it. The cost is bookkeeping a little later.")
+                        .build());
+    }
+
+    @Bean
+    Scenario sweepTwoWorkersSkipLocked(LockingExpiryTransitions locking) {
+        return new SimpleScenario("sweep-two-workers-skip-locked", LESSON,
+                "S6, better: two instances sweep the same " + WORKERS_RESERVATIONS + " reservations, SKIP LOCKED",
+                scenario -> {
+                    SweepRaces.TwoWorkers workers = sweeps.twoWorkers(locking, WORKERS_RESERVATIONS);
+                    return ScenarioReport.of(scenario)
+                            .result("worker 1", workers.first())
+                            .result("worker 2", workers.second())
+                            .result("expire() returned true", workers.expireReturnedTrue())
+                            .result("stored afterwards", workers.outcome())
+                            .note("For each reservation one worker takes the locks; the other skips it (row locked) "
+                                    + "or finds it already EXPIRED. Each reservation expires once, one notice each.")
+                            .build();
+                });
+    }
+
+    @Bean
+    Scenario expiryNoticeAfterCommit(LockingExpiryTransitions locking) {
+        return new SimpleScenario("expiry-notice-after-commit", LESSON,
+                "S6b, better: the same failure after the notice, with the notice sent after the commit",
+                scenario -> {
+                    SweepRaces.NoticeRollback rollback = sweeps.noticeThenRollback(locking);
+                    return ScenarioReport.of(scenario)
+                            .result("sweep", rollback.sweep())
+                            .result("stored afterwards", rollback.outcome())
+                            .note("The notice is published as an event and sent by a "
+                                    + "@TransactionalEventListener(phase = AFTER_COMMIT): the rolled-back expiry sent "
+                                    + "nothing, and the reservation is still a candidate for the next run.")
+                            .note("At most once: if the application died right after the commit, that notice would "
+                                    + "be lost. Exactly once needs an outbox table written in the same transaction.")
+                            .build();
+                });
+    }
+
+    @Bean
+    Scenario sweepBatched(LockingExpiryTransitions locking) {
+        return new SimpleScenario("sweep-batched", LESSON,
+                "S7, better: the same backlog of " + BACKLOG + ", pages of " + ExpirySweep.PAGE_SIZE
+                        + ", one transaction per reservation",
+                scenario -> {
+                    SweepRaces.Backlog backlog = sweeps.backlog(
+                            () -> SweepRaces.untilDone(sweeps.boundedSweep(locking)), BACKLOG);
+                    return ScenarioReport.of(scenario)
+                            .result("expired reservations", backlog.reservations())
+                            .result("sweep (runs until nothing is due)", backlog.sweep())
+                            .result("time", backlog.time())
+                            .sql("sweep", backlog.sql())
+                            .result("heap peak increase", backlog.heapPeak())
+                            .result("stored afterwards", backlog.outcome())
+                            .result("Bruno reserves a copy the sweep released, during the sweep", backlog.brunoReserves())
+                            .result("Bruno waited", backlog.brunoWaited())
+                            .result("sweep with one failure in the middle", backlog.afterAFailure())
+                            .result("stored after that sweep", backlog.outcomeAfterAFailure())
+                            .note("Each expiry commits on its own: its locks last milliseconds, so Bruno does not "
+                                    + "wait for the sweep.")
+                            .note("Compare with sweep-one-transaction: this one is slower in total (more statements "
+                                    + "per reservation: key, member lock, reservation lock, copy locks; and one commit "
+                                    + "each). What it buys is not throughput: nobody waits for it, a failure costs one "
+                                    + "reservation, and no notice is sent for an expiry that did not happen.")
+                            .note("The failing reservation rolled back alone, sent nothing, and the next run "
+                                    + "expired it. With one run every 60 s, " + BACKLOG + " reservations take "
+                                    + BACKLOG / ExpirySweep.PAGE_SIZE + " runs: the interval is not a maximum delay.")
+                            .build();
+                });
+    }
+
+    @Bean
+    Scenario returnConditional(ConditionalLoanReturnService conditionalReturn, LockingExpiryTransitions locking) {
+        return new SimpleScenario("return-conditional", LESSON,
+                "S8, better: the same retried return; the loan row decides with a conditional update",
+                scenario -> ScenarioReport.of(scenario)
+                        .result("rounds", SHORT_ROUNDS)
+                        .result("measured", ExpiryRaces.tally(rounds(SHORT_ROUNDS,
+                                () -> races.doubleReturn(conditionalReturn::giveBack, locking::collect))))
+                        .note("UPDATE loan SET returned=true WHERE id=? AND returned=false: 1 row for the first "
+                                + "return, 0 for the retry, which then just answers with the returned loan.")
+                        .note("Only the winner touches the copy, and only its status, and only if it is ON_LOAN: "
+                                + "Bruno keeps his copy, and Clara is refused.")
                         .build());
     }
 

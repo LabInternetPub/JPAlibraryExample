@@ -115,6 +115,57 @@ Pro; reports in `design/evidence/expiry-naive-scenarios.json`):
 In S7 the prediction was "Bruno waits for the whole sweep". He waits up to the lock timeout and then
 gets `503`: the sweep (8 s) holds the copy longer than any request is allowed to wait.
 
+**Stage 4 is implemented** (the better versions; `ExpiryRaceTest` re-enabled and green on both
+options; 132 tests, none skipped):
+
+| Piece | Where |
+| --- | --- |
+| `LockingExpiryTransitions` (option A, the reference): `transitionKey` projection first; locks **member → reservation → copies**; clock read after the locks; `Reservation` loaded for the first time under its lock; `Copy.collect` / `releaseFrom` on locked copies; expiry takes the member and the reservation with `SKIP LOCKED` and returns `false` instead of waiting | `expiry` |
+| `ConditionalExpiryTransitions` (option B): member locked first (lock order), then `collectIfLive` / `expireIfDue` decide by affected rows; `lendOwned`'s count checked; `releaseOwned` may legitimately return 0 | `expiry` |
+| `ExpiryNoticeListener`: `@TransactionalEventListener(AFTER_COMMIT)`; the better transitions publish the notice as an event | `expiry` |
+| `ConditionalLoanReturnService`: `closeIfOpen` (loan row decides), `shelveIfOnLoan` (status column only, only if `ON_LOAN`); a retry answers `200` with the same loan | `loan` |
+| Repositories: `ReservationKey` projection, `transitionKey`, `lockIfFree` (native `FOR UPDATE SKIP LOCKED`) on reservation and member, `findCopyIds`, `collectIfLive`, `expireIfDue`, `releaseOwned`, `shelveIfOnLoan`, `findBarcodesOfReservation`, `findCopyId`, `closeIfOpen` | `persistence` |
+| `ExpirySweepScheduler` now uses option A; `SweepRaces.untilDone` runs bounded sweeps until nothing is due | `expiry` |
+| Endpoints: `POST /better/reservations/{id}/collection`, `DELETE /better/reservations/{id}?memberEmail=`, `POST /better/loans/{id}/return` | controllers |
+| Nine better scenarios: `collect-expiry-locked`, `collect-expiry-conditional`, `cancel-locked`, `sweep-after-rereserve-owned`, `sweep-ordered`, `sweep-two-workers-skip-locked`, `expiry-notice-after-commit`, `sweep-batched`, `return-conditional` | `ExpiryScenarios` |
+| `ExpiryBetterScenariosTest`; `ExpiryRaceTest` on A and B | tests |
+
+Decisions taken in stage 4:
+
+- **`SKIP LOCKED`, not `NOWAIT`, for the member.** `NOWAIT` throws, and in PostgreSQL a failed
+  statement aborts the whole transaction: the sweep could not even return `false` cleanly.
+  `SKIP LOCKED` returns no row, and the sweep skips.
+- **The deadlock round now tries expiry again afterwards** (`expireAgain`), to show that skipping is
+  safe: the next run expires the reservation.
+- **Option A releases copies through the domain** (`lockCopies` + `Copy.releaseFrom`), keeping the
+  lock order (copies last); option B uses `releaseOwned`.
+- **Notices are "at most once".** After-commit sending never tells a member about an expiry that
+  rolled back, but a crash between commit and send loses the notice. Exactly once would need an
+  outbox table written in the same transaction; that is beyond this lesson.
+
+**Measured** (one run over HTTP on a freshly started application, same machine; reports in
+`design/evidence/expiry-better-scenarios.json`), side by side with stage 3:
+
+| Scenario pair | Naive (stage 3) | Better |
+| --- | --- | --- |
+| S2 collect vs expiry, collection first (10 rounds) | both succeed; `EXPIRED`, copy `AVAILABLE`, 1 loan, 1 notice | A and B: collect `200`, expire `false`; `COLLECTED`, copy `ON_LOAN`, 1 loan, 0 notices |
+| S2 expiry first (10 rounds) | both succeed; `COLLECTED`, copy `AVAILABLE`, 1 loan | A and B: collect `409`, expire `true`; `EXPIRED`, copy `AVAILABLE`, 0 loans, 1 notice |
+| S3 stale cancel (5) | `204`; `CANCELLED`, copy on the shelf, 1 open loan | `409`; `COLLECTED`, copy `ON_LOAN` |
+| S4 late sweep | copy freed; Bruno holds nothing; Clara `201`; 2 live promises | copy stays Bruno's; Clara `409`; 1 live promise |
+| S5 lock order (5) | sweep aborted with `40P01` | sweep skipped (`false`), Anna `201` without waiting, next run expires |
+| S6 two workers, 100 reservations | 200 `true`, 200 notices | 100 `true` (51 + 49), 100 notices |
+| S6b failure after the notice | 1 member told about an expiry that rolled back | 2 notices for 2 expiries; the failed one sent nothing |
+| S7 backlog of 1,000 | 6.2–8.0 s, one transaction; Bruno `503` after 5 s; one failure: 0 expired, 501 false notices | 12.4 s in 11 runs of ≤ 100; Bruno `201` after 19 ms; one failure: retried by the next run, 1,000 expired, 1,000 notices |
+| S8 retried return (5) | Bruno's reservation erased; Clara `201` | Bruno keeps the copy; retry `200`; Clara `409` |
+
+**S7 differs from the prediction.** The bounded sweep is about **twice as slow in total** (5,011
+statements against 3,061: key, member lock, reservation lock, copy locks per reservation, and 1,000
+commits), and its heap peak is not lower (90 MB against 86 MB; the number is noisy and mostly
+garbage). At 1,000 reservations the one-transaction sweep's dirty checking does not hurt yet. What
+the bounded sweep buys is not throughput: nobody waits behind it, a failure costs one reservation,
+and no notice is sent for an expiry that did not happen. The table of §4 S7 predicted otherwise for
+time and memory; this measurement replaces it.
+
 The boundary is decided once, as in Affora: a reservation is live while `now < expiresAt`. At
 `expiresAt − 1 ns` collecting succeeds; at `expiresAt` collecting fails and expiring succeeds.
 There is no instant at which both are allowed, and none at which neither is.

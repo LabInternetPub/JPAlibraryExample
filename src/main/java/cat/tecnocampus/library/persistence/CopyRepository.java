@@ -84,6 +84,35 @@ public interface CopyRepository extends JpaRepository<Copy, UUID> {
             """)
     int lendOwned(@Param("reservation") UUID reservationId);
 
+    /**
+     * Expiry, better (option B): back to the shelf only the copies this reservation still holds. A
+     * copy that a newer reservation took after the deadline does not match, so 0 is a normal
+     * answer, not an error (the late-sweep lesson).
+     */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("""
+            update Copy c set c.status = cat.tecnocampus.library.domain.CopyStatus.AVAILABLE,
+                c.reservationId = null, c.reservedUntil = null
+            where c.reservationId = :reservation and c.status = cat.tecnocampus.library.domain.CopyStatus.RESERVED
+            """)
+    int releaseOwned(@Param("reservation") UUID reservationId);
+
+    /** Return, better: back on the shelf only if it is on loan. Touches only the status column. */
+    @Modifying(clearAutomatically = true, flushAutomatically = true)
+    @Query("""
+            update Copy c set c.status = cat.tecnocampus.library.domain.CopyStatus.AVAILABLE
+            where c.id = :copy and c.status = cat.tecnocampus.library.domain.CopyStatus.ON_LOAN
+            """)
+    int shelveIfOnLoan(@Param("copy") UUID copyId);
+
+    /** The barcodes of a reservation's copies, for its notice, without loading entities. */
+    @Query("""
+            select c.barcode from Copy c
+            where c.id in (select x from Reservation r join r.copyIds x where r.id = :reservation)
+            order by c.barcode
+            """)
+    List<String> findBarcodesOfReservation(@Param("reservation") UUID reservationId);
+
     /** Reservation requests name copies by branch and barcode: ids change at every start of the example. */
     @Query("select new cat.tecnocampus.library.persistence.BarcodeRef(c.barcode, c.id) from Copy c "
             + "where c.branch.name = :branch and c.barcode in :barcodes")

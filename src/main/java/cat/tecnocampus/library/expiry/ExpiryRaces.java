@@ -197,8 +197,9 @@ public class ExpiryRaces {
 
     // ---- S5: expiry and a new reservation of the same member, locks in opposite orders -----------
 
-    public record DeadlockRound(String reserve, String expire, ReservationStatus oldReservation, CopyStatus copy,
-                                String copyHeldBy) {
+    /** {@code expireAgain}: the next sweep run, once both have finished. */
+    public record DeadlockRound(String reserve, String expire, String expireAgain, ReservationStatus oldReservation,
+                                CopyStatus copy, String copyHeldBy) {
     }
 
     /**
@@ -224,11 +225,12 @@ public class ExpiryRaces {
             expiringStop.resume();
             String reserved = ExpiryDemo.outcome(reserving);
             String expired = ExpiryDemo.outcome(expiring);
+            String again = ExpiryDemo.outcome(demo.async(() -> expirer.expire(old.id())));
 
             Copy copy = copies.findById(demo.copyId("N0003")).orElseThrow();
             String holder = copy.getReservationId() == null ? "none"
                     : copy.getReservationId().equals(old.id()) ? "the old reservation" : "the new reservation";
-            return log("deadlock", new DeadlockRound(reserved, expired, status(old), copy.getStatus(), holder));
+            return log("deadlock", new DeadlockRound(reserved, expired, again, status(old), copy.getStatus(), holder));
         } finally {
             demo.finish();
         }

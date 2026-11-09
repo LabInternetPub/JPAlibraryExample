@@ -144,11 +144,11 @@ public class SweepRaces {
      * nothing is due) three times on fresh data: measured alone; with Bruno reserving, meanwhile,
      * the copy of the first expired reservation; and with one reservation in the middle failing.
      */
-    public Backlog backlog(Supplier<ExpirySweep.SweepResult> sweepAll, int count) {
+    public Backlog backlog(Supplier<?> sweepAll, int count) {
         try {
             // 1. Measured alone
             List<UUID> ids = expired(count);
-            Measurement.SingleRun<ExpirySweep.SweepResult> run =
+            Measurement.SingleRun<?> run =
                     measurement.withoutSqlLog(() -> measurement.once(sweepAll));
             Outcome measured = outcome(ids);
 
@@ -156,7 +156,7 @@ public class SweepRaces {
             List<ExpiryFixtures.Reserved> backlog = expiredOnCentral(count);
             UUID firstCopy = backlog.getFirst().copyId();
             UUID second = backlog.get(1).reservationId();
-            Future<ExpirySweep.SweepResult> sweeping = demo.async(() -> measurement.withoutSqlLog(sweepAll));
+            Future<?> sweeping = demo.async(() -> measurement.withoutSqlLog(sweepAll));
             while (notices.sentFor(second) == 0 && !sweeping.isDone()) {
                 Thread.onSpinWait();
             }
@@ -176,6 +176,35 @@ public class SweepRaces {
         } finally {
             demo.finish();
         }
+    }
+
+    /** Several bounded runs, one after the other, until a run finds nothing more to expire. */
+    public record Drained(int runs, int candidates, int expired, int failed) {
+    }
+
+    /**
+     * What "the next run picks it up" looks like: bounded runs until nothing is due (or a run
+     * expires nothing, so a reservation that always fails cannot loop forever).
+     */
+    public static Drained untilDone(ExpirySweep sweep) {
+        int runs = 0;
+        int candidates = 0;
+        int expired = 0;
+        int failed = 0;
+        ExpirySweep.SweepResult run;
+        do {
+            run = sweep.sweepOnce();
+            runs++;
+            candidates += run.candidates();
+            expired += run.expired();
+            failed += run.failed();
+        } while (run.candidates() > 0 && run.expired() > 0);
+        return new Drained(runs, candidates, expired, failed);
+    }
+
+    /** A bounded sweep with the application's pause points, for scenarios. */
+    public ExpirySweep boundedSweep(ReservationExpirer expirer) {
+        return sweep(expirer, ExpirySweep.PAGE_SIZE);
     }
 
     /** For reports: how many results ended in each distinct way. */

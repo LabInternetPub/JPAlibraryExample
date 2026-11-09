@@ -38,7 +38,10 @@ class ExpiryNaiveScenariosTest {
         assertThat(registry.all()).filteredOn(s -> s.lesson().equals("expiry")).extracting("name")
                 .containsExactlyInAnyOrder("collect-expiry-naive", "cancel-stale-naive", "sweep-after-rereserve-naive",
                         "sweep-deadlock-naive", "sweep-two-workers-naive", "expiry-notice-rollback-naive",
-                        "sweep-one-transaction", "return-double-scan-naive");
+                        "sweep-one-transaction", "return-double-scan-naive",
+                        "collect-expiry-locked", "collect-expiry-conditional", "cancel-locked",
+                        "sweep-after-rereserve-owned", "sweep-ordered", "sweep-two-workers-skip-locked",
+                        "expiry-notice-after-commit", "sweep-batched", "return-conditional");
     }
 
     @Test
