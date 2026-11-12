@@ -6,7 +6,9 @@ concept is implemented twice, side by side: a **naive** version, which works for
 little data, and a **better** version. Each version has a **scenario** that runs it, measures it
 and prints a report, so the two can be compared in class.
 
-The design and the concepts are explained in [`design/concepts.md`](design/concepts.md) and
+The lessons for students are in [`lessons/`](lessons/) (start with
+[`lessons/README.md`](lessons/README.md)). The documents used to design the example are in
+[`design/`](design/), among them [`design/concepts.md`](design/concepts.md) and
 [`design/domain-and-examples.md`](design/domain-and-examples.md).
 
 ## Requirements
@@ -60,72 +62,56 @@ order, any number of times.
 
 This runs the named scenarios, prints their reports in the console and stops the application.
 
-## The demonstration, lesson by lesson
+## The lessons
 
-The numbers below come from one run on an Apple M3 Pro with 18 GB. Other machines give
-other values, with the same ratios.
+The explanations for students are in [`lessons/`](lessons/). Start with
+[`lessons/README.md`](lessons/README.md): it describes each document and gives a recommended reading
+order. Each lesson shows a naive version, a scenario that measures it, why it fails, and the better
+version.
 
-### 1. Catalogue: the N+1 problem
+**[`lessons/domain-reads-and-reservations.md`](lessons/domain-reads-and-reservations.md)**: the
+domain, the data loaded at startup and how the scenarios work, then:
 
-| Scenario | What it does | What to show |
-| --- | --- | --- |
-| `catalogue-naive` | Loads the books, then each book's author and subjects lazily | 624 statements for 321 books (1 + 302 authors + 321 subject lists) |
-| `catalogue-join-fetch` | One `JOIN FETCH` query | 1 statement, but still 643 managed entities |
-| `catalogue-projection` | One query into records | 1 statement, no entities |
+- **The catalogue: the N+1 problem when reading.** Scenarios `catalogue-naive`,
+  `catalogue-join-fetch`, `catalogue-projection`.
+- **The shelf map: the cost of entities when there is no N+1.** Scenarios `first-level-cache`,
+  `shelf-map-naive`, `shelf-map-projection`.
+- **Reserving the last copy: check-then-act and the lost update.** Scenarios `reservation-naive`,
+  `reservation-pessimistic`, `reservation-overlap-naive`, `reservation-overlap-pessimistic`.
+- **The per-member limit: write skew.** Scenarios `member-limit-naive`, `member-limit-locked`.
 
-The naive report also shows the 20 books of `Prolific Author`: 22 statements instead of 41,
-because the persistence context answers the repeated author. Endpoints: `GET /naive/books`,
-`GET /better/books/join-fetch`, `GET /better/books/projection`.
+**[`lessons/bulk-import.md`](lessons/bulk-import.md)**: importing a branch's copies from a CSV
+(write-side N+1, `persist` vs `merge`, auto-flush, dirty checking, JDBC batching). Scenarios
+`import-naive`, `import-batched`.
 
-### 2. Shelf map: entities and response size
+**[`lessons/reservation-expiry-lessons.md`](lessons/reservation-expiry-lessons.md)**: reservation
+expiry, collection and return. Its scenarios are the "Expiry" requests of `scenarios.http`.
 
-| Scenario | What it does | What to show |
-| --- | --- | --- |
-| `first-level-cache` | The same copy looked up twice, in one transaction and in two | 1 statement and the same object, then 2 statements and two objects |
-| `shelf-map-naive` | Central's 20,000 copies as entities, one JSON object per copy | Only 2 statements, but 20,301 entities and 2.7 MB of JSON |
-| `shelf-map-projection` | Scalars grouped by shelf, with parallel arrays | 1 entity (the branch) and 1.3 MB |
+- Lesson 0: Sequential tests cannot see a race
+- Lesson 1: Lost update between two transitions
+- Lesson 2: Read the time after you have the right to decide
+- Lesson 3: An affected-row count you ignore is not a guarantee
+- Lesson 4: A lock does not refresh an entity you already loaded
+- Lesson 5: Lazy expiry: decide on read, write only when you must
+- Lesson 6: When lazy expiry and the sweep meet: release only what you still own
+- Lesson 7: Lock order, deadlocks, and a job that never waits
+- Lesson 8: Two application instances, and effects exactly once
+- Lesson 9: Side effects that leave the system: send them after the commit
+- Lesson 10: Designing the sweep: one big transaction or many small ones
+- Lesson 11: A retried return, idempotency, and full-row updates
 
-Both versions show the 100 expired reservations as available, and neither reveals who holds
-a copy or until when. Endpoints: `GET /naive/branches/Central/shelf-map`,
-`GET /better/branches/Central/shelf-map`.
+**[`lessons/conditional-update-vs-select-lock.md`](lessons/conditional-update-vs-select-lock.md)**:
+the two correct ways to let only one transaction perform a transition (`SELECT … FOR UPDATE` vs a
+conditional `UPDATE`), on the return of a loan.
 
-### 3. Import: writing in bulk
+**[`lessons/collect-expiry-lock-vs-conditional.md`](lessons/collect-expiry-lock-vs-conditional.md)**:
+the same comparison on the project's collect and expire code. Scenarios `collect-expiry-locked`,
+`collect-expiry-conditional`.
 
-| Scenario | What it does | What to show |
-| --- | --- | --- |
-| `import-naive` | Imports 5,000 rows into Annex, then the same file again: lookups and `save()` per row | First import: about 21 s; 15,001 statements; 5,000 JDBC batches of one insert each |
-| `import-batched` | The same 5,000 rows, then 20,000: one lookup for all rows, `persist()`, flush + clear every 500 | About 0.3 s for 5,000 rows and 0.5 s for 20,000; 3 statements and 40 batches |
-
-**The whole `import-naive` scenario (both imports) takes about 40 seconds**, longer on a slower
-machine. Its request in `scenarios.http` raises the HTTP Client read timeout (`# @timeout 300`):
-without it the client can give up with a `ReadTimeoutException` while the server is still
-importing (`--scenario=import-naive` on the command line has no such limit). The cost grows with
-the square of the rows, which is why it runs 5,000 rows and not 20,000 (that took about seven minutes). The `.http` file also
-uploads `annex-5000-error-last-row.csv`, whose last row has an unknown ISBN. The import answers
-`400` with the line number and imports nothing: the naive version writes 4,999 copies before it
-finds the error, and the rollback undoes them.
-
-### 4. Reservation: lost update
-
-| Scenario | What it does | What to show |
-| --- | --- | --- |
-| `reservation-naive` | 50 members reserve the bestseller's single copy at the same instant; check, then write | 50 × `201`: fifty promises for one copy |
-| `reservation-pessimistic` | The same, with `SELECT … FOR UPDATE` | 1 × `201`, 49 × `409` |
-| `reservation-overlap-naive` | Two members reserve `[N0001, N0002]` and `[N0003, N0002]` at once | N0002 promised to both |
-| `reservation-overlap-pessimistic` | The same, with locks | One wins; the loser's other copy stays available |
-
-The concurrency scenarios hold every thread between the read and the write (a `RaceWindow`), so
-the race happens on every run instead of only when the timing is unlucky. Endpoints:
-`POST /naive/reservations`, `POST /better/reservations`.
-
-### 5. Member limit: write skew
-
-| Scenario | What it does | What to show |
-| --- | --- | --- |
-| `member-limit-naive` | A member with 2 loans reserves 2 different copies in two tabs at once; copies locked, count unlocked | 2 × `201`: 6 items for a limit of 5 |
-| `member-limit-locked` | The same, locking the member row before counting | 1 × `201`, 1 × `409`: 4 items |
-
-Endpoint: `POST /better/reservations/member-locked`.
+**Running `import-naive` in class:** the whole scenario (both imports) takes **about 40 seconds**,
+longer on a slower machine. Its request in `scenarios.http` raises the HTTP Client read timeout
+(`# @timeout 300`). Without it, the client can give up with a `ReadTimeoutException` while the
+server is still importing. `--scenario=import-naive` on the command line has no such limit.
 
 ## Looking inside the database
 
@@ -163,12 +149,16 @@ transactions, privacy of responses, and the endpoints. They are not the demonstr
 
 ```text
 src/main/java/cat/tecnocampus/library
+├── (root)        LibraryApplication, ClockConfiguration, MovableClock (the clock scenarios can stop and move)
 ├── domain        entities and their rules (Copy, Reservation, MemberLimit, ...)
 ├── persistence   Spring Data repositories and projection records
-├── catalogue     lesson 1: naive, JOIN FETCH and projection services, controller, scenarios
-├── shelfmap      lesson 2
-├── importing     lesson 3
-├── reservation   lessons 4 and 5
+├── catalogue     catalogue lesson: naive, JOIN FETCH and projection services, controller, scenarios
+├── shelfmap      shelf map lesson
+├── importing     bulk import lesson
+├── reservation   reserving the last copy and the member limit
+├── expiry        reservation expiry lessons: collect, cancel and expire (naive, locking, conditional),
+│                 the sweep and its scheduler, expiry notices, scenarios
+├── loan          return of a loan (naive and conditional), the retried-return lesson
 ├── web           ProblemDetailsHandler (errors as application/problem+json)
 └── scenario      Scenario, ScenarioRunner, ScenarioController, Measurement, RaceWindow, ...
 ```
