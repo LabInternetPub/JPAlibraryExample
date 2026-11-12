@@ -3,8 +3,8 @@
 This document explains the import lesson (`import-naive` and `import-batched`) in detail: what each version
 sends to the database, why the naive one grows with the **square** of the rows, why its inserts
 travel in **batches of one**, what **dirty checking** costs in each version, and which JPA tools the
-better version uses. The domain and the data loaded at startup are in section 1.1–1.2 of
-[reservation-expiry-lessons.md](reservation-expiry-lessons.md#11-the-library-domain); the concepts are
+better version uses. The domain and the data loaded at startup are in sections 1–2 of
+[domain-reads-and-reservations.md](domain-reads-and-reservations.md); the concepts are
 summarized in [concepts.md](../design/concepts.md).
 
 ## 1. The task

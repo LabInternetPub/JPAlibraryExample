@@ -14,8 +14,8 @@ Every concept comes with:
 
 How to use it:
 
-- Read sections 1 and 2 first: the domain, the data, the problem, and the background every
-  lesson relies on.
+- Read sections 1 and 2 first: the problem and the background every lesson relies on. The domain
+  and the data are in [`domain-reads-and-reservations.md`](domain-reads-and-reservations.md).
 - Then each lesson of section 3 can be read on its own.
 - Run the scenarios yourself: start the application (`./mvnw spring-boot:run`) and use the
   "Expiry" requests at the end of [`../scenarios.http`](../scenarios.http). Each scenario prints a
@@ -28,187 +28,14 @@ the code this document was written with.
 
 ---
 
-## 1. The library and the problem
+## 1. The problem
 
-Sections 1.1 and 1.2 describe the whole example application: its entities and the data it starts
-with. All the lesson documents use them. The rest of this section (1.3–1.6) is the problem of
-this document: the life of a reservation.
+The entities, their rules and the data loaded at startup are described in sections 1 and 2 of
+[`domain-reads-and-reservations.md`](domain-reads-and-reservations.md). This document looks at one
+part of that domain: what happens to a reservation after it has been made, and to the loans it
+becomes.
 
-### 1.1 The library domain
-
-A public library has several **branches**. Each branch holds physical **copies** of **books**. A
-book has one **author** and a few **subjects**. **Members** borrow copies (**loans**) or reserve
-them for 48 hours (**reservations**). A member can have at most 5 active items at a time. A
-reservation ends exactly once: **collected** at the desk (its copies become loans), **cancelled**
-by the member, or **expired** after its deadline (a scheduled sweep stores it and notifies the
-member). A loan ends when the copy is **returned**.
-
-```mermaid
-classDiagram
-    direction LR
-    class Author {
-        UUID id
-        String name
-        String nationality
-    }
-    class Subject {
-        UUID id
-        String name
-    }
-    class Book {
-        UUID id
-        String isbn
-        String title
-        int year
-    }
-    class Branch {
-        UUID id
-        String name
-        String city
-    }
-    class Copy {
-        UUID id
-        String barcode
-        int floor
-        String shelf
-        Condition condition
-        CopyStatus status
-        UUID reservationId
-        Instant reservedUntil
-        isAvailableAt(now) boolean
-        visibleStatusAt(now) CopyStatus
-        reserve(reservationId, until, now)
-        lend(now)
-        collect(reservationId, now)
-        releaseFrom(reservationId) boolean
-        makeAvailable()
-        returnToShelf()
-        withdraw()
-        reimport(floor, shelf, condition) boolean
-    }
-    class Member {
-        UUID id
-        String name
-        String email
-    }
-    class Loan {
-        UUID id
-        Instant startedAt
-        Instant dueAt
-        boolean returned
-        Instant returnedAt
-        forCollection(member, copy, now)$
-        giveBack(now) boolean
-        isOpen() boolean
-    }
-    class Reservation {
-        UUID id
-        List~UUID~ copyIds
-        int quantity
-        Instant createdAt
-        Instant expiresAt
-        ReservationStatus status
-        checkAvailable(requested, found, now)$
-        reserve(copies, now)
-        isLiveAt(now) boolean
-        isExpiredAt(now) boolean
-        collect(now)
-        expire(now) boolean
-        cancel(memberId, now)
-    }
-    class MemberLimit {
-        <<domain rule>>
-        MAXIMUM = 5
-        check(existing, requested)$
-    }
-
-    Book "*" --> "1" Author : author (LAZY)
-    Book "*" --> "*" Subject : subjects (LAZY)
-    Copy "*" --> "1" Book : book (LAZY)
-    Copy "*" --> "1" Branch : branch (LAZY)
-    Loan "*" --> "1" Member
-    Loan "*" --> "1" Copy
-    Reservation "*" --> "1" Member
-    Reservation ..> Copy : copyIds
-```
-
-#### Enumerations
-
-| Enum | Values |
-| --- | --- |
-| `CopyStatus` | `AVAILABLE`, `ON_LOAN`, `RESERVED`, `WITHDRAWN` |
-| `Condition` | `NEW`, `GOOD`, `WORN`, `DAMAGED` |
-| `ReservationStatus` | `ACTIVE`, `CANCELLED`, `COLLECTED`, `EXPIRED` (`ACTIVE` is left exactly once) |
-
-#### Domain rules
-
-The rules live in the entities, never in the services. The services orchestrate them.
-
-| Rule | Where | Topic |
-| --- | --- | --- |
-| A barcode is unique within a branch | `Copy` + unique constraint `(branch, barcode)` | Import |
-| A copy is available if its status is `AVAILABLE`, or `RESERVED` with a passed `reservedUntil` | `Copy.isAvailableAt(now)` | Shelf map, Reservation |
-| The public status of an expired reservation is `AVAILABLE` | `Copy.visibleStatusAt(now)` | Shelf map |
-| All or nothing: every requested copy must have been found and be available; the exception lists the ones that are not | `Reservation.checkAvailable(requested, found, now)` | Reservation |
-| Reserving a copy that is not available is refused | `Copy.reserve(...)` throws `CopiesUnavailableException` | Reservation |
-| A loan puts the copy on loan; returning it puts it back | `Loan` constructor → `Copy.lend(now)`, `Loan.giveBack()` → `Copy.returnToShelf()` | Member limit (open loans count) |
-| A reservation lasts 48 hours | `Reservation` constructor computes `expiresAt` | Reservation |
-| A reservation is live while `ACTIVE` and not expired | `Reservation.isLiveAt(now)` | Member limit |
-| A member has at most 5 active items (open loans + copies in live reservations) | `MemberLimit.check(existing, requested)` | Member limit |
-| Re-importing a copy changes only its physical attributes; it keeps its id and status | `Copy.reimport(...)` | Import |
-| Collect only while live (`now < expiresAt`); expire only once due (`now >= expiresAt`): no instant allows both, none allows neither | `Reservation.collect(now)`, `Reservation.expire(now)` (returns `true` only for the call that must release) | Expiry |
-| Expired for a reader as soon as the deadline passes, swept or not (`GET` answers `410`) | `Reservation.isExpiredAt(now)` | Expiry |
-| Only the member, and only while live, can cancel; another member's reservation is "not found" | `Reservation.cancel(memberId, now)` | Expiry |
-| A reserved copy is collected only by the reservation holding it, before its deadline; the deadline disappears | `Copy.collect(reservationId, now)`; `Loan.forCollection(...)` records it | Expiry |
-| An ended reservation gives a copy back only if it still holds it | `Copy.releaseFrom(reservationId)` (`makeAvailable()` is the naive, unconditional release) | Expiry |
-| Returning a loan is idempotent: a retry has no second effect | `Loan.giveBack(now)` returns `true` only for the call that closed it | Expiry |
-
-#### Mapping decisions and what they teach
-
-| Decision | Why | Concept |
-| --- | --- | --- |
-| UUID ids assigned in the constructor | The id exists before the database sees it | `persist` vs `merge`, `isNew()` |
-| Every `@ManyToOne` marked `LAZY` | JPA's default for it is `EAGER` | Lazy vs eager loading |
-| `Book.subjects` as `@ManyToMany List` | A small collection per book, like Affora's performances per event | N+1 on collections, `JOIN FETCH` |
-| `Copy` has no collection back to its loans or reservations | The copy row alone answers "is it available?" | Aggregates, keeping the lockable row small |
-| `Reservation.copyIds` as an `@ElementCollection` of ids | A reservation refers to copies, it does not own them | References between aggregates |
-| `Copy.reservationId` and `reservedUntil` on the copy row | The availability check and the lock happen on one row | Lockable row, lost update |
-
-The rows of the domain rules table marked **Expiry** are the ones this document is about.
-
-### 1.2 Data loaded at startup
-
-Hibernate drops and creates the schema at every start (`ddl-auto=create`). `data.sql` runs after
-it (`defer-datasource-initialization=true`) and generates the rows with `generate_series`. Every
-start begins from the same data; ids are random UUIDs, so scenarios find rows by business key
-(branch name, ISBN, barcode, member email). The counts below are checked by
-`ExampleDataAndQueriesTest`.
-
-| Data | Volume | Used in |
-| --- | --- | --- |
-| Branches | `Central` (20,000 copies), `North` (small, for reservations), `Annex` (empty, target of the import) | All |
-| Authors | 302: `Author 001`–`Author 300` (one per book), `Prolific Author` (20 books), `Bestselling Author` (the bestseller) | Catalogue |
-| Subjects | 20 | Catalogue |
-| Books | 321: `Title 001`–`Title 300` (ISBN `978-84-000001`…), `Prolific Title 301`–`320`, and `The Last Copy` (ISBN `978-84-999999`); each with 2–4 subjects (963 links) | Catalogue, Shelf map |
-| Copies in `Central` | 20,000 (`C000001`–`C020000`) over books 1–300; 5 floors × 40 shelves × 100 copies | Shelf map; the expiry sweep scenarios reserve hundreds of its available copies for the scenario members (`ExpiryFixtures`) |
-| Statuses in `Central` | 18,450 `AVAILABLE`, 1,000 `ON_LOAN` (with their loans), 500 `RESERVED` (with their reservations; 100 already expired, so the map shows 18,550 available), 50 `WITHDRAWN` | Shelf map |
-| Members | 60 scenario members (`member01@library.test`…) with no items; 500 readers (`reader001@library.test`…) who own Central's loans and reservations, at most 3 items each | Reservation, Member limit |
-| Copies in `North` | The **bestseller** (`N-BEST`, a single copy) and 30 ordinary available copies (`N0001`–`N0030`) | Reservation, Member limit |
-| Copies in `Annex` | None | Import |
-
-Resource files:
-
-- `import/annex-20000.csv`: 20,000 rows `isbn,barcode,floor,shelf,condition`, all ISBNs from the
-  loaded books.
-- `import/annex-5000.csv`: the first 5,000 rows of the same file (the naive import's size).
-- `import/annex-5000-error-last-row.csv`: the same 5,000 rows, the last one with an unknown ISBN.
-  The parser accepts it; only the database can tell, so the naive import writes 4,999 copies
-  before it fails and the rollback undoes them.
-
-### 1.3 What the library wants
-
-Of the whole domain, this document looks at one part: what happens to a reservation after it has
-been made, and to the loans it becomes.
+### 1.1 What the library wants
 
 - A member **reserves** one or more copies. The reservation lasts **48 hours**
   ([`Reservation.DURATION`](../src/main/java/cat/tecnocampus/library/domain/Reservation.java#L39)).
@@ -236,7 +63,7 @@ The endpoints, in a naive and a better version:
 | Read | `GET /reservations/{id}` | `200` | `410 /problems/reservation-expired` once the deadline has passed |
 | Expire | no endpoint: the sweep ([`ExpirySweep`](../src/main/java/cat/tecnocampus/library/expiry/ExpirySweep.java#L55)) | | |
 
-### 1.4 State the invariant before writing any code
+### 1.2 State the invariant before writing any code
 
 The most useful thing you can do before writing a line of code is to write down what must
 **always** be true. For one reservation, collection and expiry compete. Exactly **one** of them
@@ -256,7 +83,7 @@ Two consequences you will use all the time:
   status is not enough: the tests of this lesson check the five columns of the table, read from
   the database after both transactions have finished.
 
-### 1.5 The time rule lives in the domain, and takes `now` as a parameter
+### 1.3 The time rule lives in the domain, and takes `now` as a parameter
 
 "A reservation is live while `now < expiresAt`" is a **business rule**, so it lives in the entity:
 
@@ -311,7 +138,7 @@ returns `true` only for the call that closed the loan.
 > correct. Every bug in this document is about **how many transactions get to apply a correct rule
 > to the same row, and on which data**.
 
-### 1.6 A clock you can control
+### 1.4 A clock you can control
 
 Every service receives a `java.time.Clock` bean and calls `clock.instant()`. In this application
 the bean is a [`MovableClock`](../src/main/java/cat/tecnocampus/library/MovableClock.java#L24): it is
@@ -988,7 +815,7 @@ the retry with an error would make the client believe the return failed.
 
 For a transition of a row that several operations compete for:
 
-1. **Write the invariant** (1.4) and the boundary (1.5) first.
+1. **Write the invariant** (1.2) and the boundary (1.3) first.
 2. **Before arbitration, read only scalars** (lesson 4): ids, keys, as a projection.
 3. **Take the right to decide on one row**, in the global lock order (lesson 7):
    - option A: `SELECT … FOR UPDATE` (`@Lock(PESSIMISTIC_WRITE)`), then load the entity under the
