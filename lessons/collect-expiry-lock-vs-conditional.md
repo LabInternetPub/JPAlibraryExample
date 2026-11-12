@@ -13,7 +13,7 @@ Both scenarios run the race in [`ExpiryRaces`](../src/main/java/cat/tecnocampus/
 (`collectionCommitsFirst`, `expiryCommitsFirst`) and are defined in
 [`ExpiryScenarios`](../src/main/java/cat/tecnocampus/library/expiry/ExpiryScenarios.java). Run them
 with the application started (`./mvnw spring-boot:run`) and the requests in
-[`scenarios.http`](../scenarios.http):
+[`../scenarios.http`](../scenarios.http):
 
 ```http
 POST {{host}}/scenarios/collect-expiry-locked
@@ -455,7 +455,7 @@ reservation-level check (the lock + Java `if` in A, the `WHERE` in B) on committ
 
 ## 5. Measured
 
-From [`evidence/expiry-better-scenarios.json`](evidence/expiry-better-scenarios.json), 10 rounds
+From [`../design/evidence/expiry-better-scenarios.json`](../design/evidence/expiry-better-scenarios.json), 10 rounds
 per ordering for each scenario:
 
 | Scenario | Ordering | collect | expire | Reservation | Copy | Open loans | Notices | Rounds matching required |
@@ -467,7 +467,7 @@ per ordering for each scenario:
 
 Same result, every round, for both options. For contrast, `collect-expiry-naive` answered `200` and
 `true` in every round of both orderings
-([`evidence/expiry-naive-scenarios.json`](evidence/expiry-naive-scenarios.json)).
+([`../design/evidence/expiry-naive-scenarios.json`](../design/evidence/expiry-naive-scenarios.json)).
 
 ---
 

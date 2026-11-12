@@ -201,7 +201,7 @@ flowchart LR
 | `DemoReset` | Restores the rows a scenario uses (JPQL bulk deletes and updates), including any copy of any branch held or lent by a scenario member | Identical data for naive and better |
 | `MovableClock` (the application's `Clock` bean) | The system clock, truncated to microseconds, unless a scenario stops it (`fixAt`) or moves it (`advance`) | Controllable time; Java and SQL compare at the same precision |
 | `TransitionPauses` | Named points in the services; a scenario arms one to **stop** a thread until resumed, make N threads **meet**, or make a thread **fail** | Forcing one specific interleaving, not just "everybody at once" |
-| `DemoClockController` | `GET`/`POST`/`DELETE /demo/clock?plusHours=…` | Showing expiry live from `scenarios.http` |
+| `DemoClockController` | `GET`/`POST`/`DELETE /demo/clock?plusHours=…` | Showing expiry live from `../scenarios.http` |
 
 ## 4. Lesson 1: Bulk import of a branch's copies
 
@@ -209,7 +209,7 @@ flowchart LR
 growth, JDBC batching, `getReferenceById`, atomic import.
 
 The detailed explanation of both versions (batches of one, quadratic growth, dirty checking, the
-tricks of the batched version) is in [import.md](import.md).
+tricks of the batched version) is in [import.md](../lessons/bulk-import.md).
 
 **Endpoints:** `POST /naive/branches/{name}/copies/import` and
 `POST /better/branches/{name}/copies/import` (multipart field `file`). Response: rows, created,
@@ -352,7 +352,7 @@ Hibernate keeps no snapshots and never flushes. Cheaper entities, still entities
   - the JDBC connection is marked read-only, and PostgreSQL runs the transaction as `READ ONLY`.
 - **What it saves.** To find changes without being told, Hibernate normally keeps a **snapshot**
   of every entity it loads (a copy of its values) and, at each flush, compares every managed
-  entity with its snapshot. This is dirty checking; [import.md](import.md) shows what it costs in
+  entity with its snapshot. This is dirty checking; [import.md](../lessons/bulk-import.md) shows what it costs in
   a write. A read-only entity needs no snapshot, and with no flush there is no dirty checking. For
   the 643 entities of the naive catalogue, that is 643 snapshots neither built nor compared.
 - **What it does not save.** The entities are still entities. Hibernate still builds every
@@ -650,7 +650,7 @@ over HTTP on a freshly started application:
 **Example tests:** `ReservationExpiryTest`, `CopyCollectTest`, `LoanTest`, `MovableClockTest` (unit);
 `ExpiryTransitionTest` (sequential, naive, S1 and the sweep's page bound); `ExpiryRaceTest` (the
 mandatory test: both orderings × 10 on options A and B; it failed on the naive version first,
-`design/evidence/expiry-naive-race.log`); `ExpiryNaiveScenariosTest` (each naive scenario does its
+`evidence/expiry-naive-race.log`); `ExpiryNaiveScenariosTest` (each naive scenario does its
 damage); `ExpiryBetterScenariosTest` (each better scenario keeps the invariant).
 
 ## 10. Package layout

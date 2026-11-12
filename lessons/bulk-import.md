@@ -3,9 +3,9 @@
 This document explains the import lesson (`import-naive` and `import-batched`) in detail: what each version
 sends to the database, why the naive one grows with the **square** of the rows, why its inserts
 travel in **batches of one**, what **dirty checking** costs in each version, and which JPA tools the
-better version uses. The domain and the measurement plan are in
-[domain-and-examples.md](domain-and-examples.md); the concepts are summarized in
-[concepts.md](concepts.md).
+better version uses. The domain and the data loaded at startup are in section 1.1–1.2 of
+[reservation-expiry-lessons.md](reservation-expiry-lessons.md#11-the-library-domain); the concepts are
+summarized in [concepts.md](../design/concepts.md).
 
 ## 1. The task
 
@@ -330,10 +330,10 @@ of flushes (n / 500 instead of about 2 per row).
 | The scalar indexes | `BookRepository.findIsbnIndex`, `CopyRepository.findBarcodeIndex` |
 | The domain update | `Copy.reimport` |
 | The scenarios and how they measure | `importing/ImportScenarios.java`, `scenario/Measurement.java`, `scenario/JdbcExecutionCounter.java` |
-| Batching configuration | `src/main/resources/application.properties` |
+| Batching configuration | `../src/main/resources/application.properties` |
 | Tests | `CopyCsvParserTest`, `CopyImportTest` |
 
-Run `POST /scenarios/import-naive` and `POST /scenarios/import-batched` from `scenarios.http`
+Run `POST /scenarios/import-naive` and `POST /scenarios/import-batched` from `../scenarios.http`
 (the naive one takes about 40 s), or
 `./mvnw spring-boot:run -Dspring-boot.run.arguments=--scenario=import-naive,import-batched`.
 
