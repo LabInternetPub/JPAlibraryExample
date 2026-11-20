@@ -34,7 +34,12 @@
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-starter-validation</artifactId>
         </dependency>
-        <!-- Starts the postgres service of compose.yaml when the application runs. -->
+        <!-- RestClient: the HTTP client the book shop uses to call the payment gateway. -->
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-restclient</artifactId>
+        </dependency>
+        <!-- Starts the services of compose.yaml (PostgreSQL, payment gateway) when the application runs. -->
         <dependency>
             <groupId>org.springframework.boot</groupId>
             <artifactId>spring-boot-docker-compose</artifactId>

@@ -207,3 +207,72 @@ Content-Type: application/json
 
 ### 8. Return the copy; run it twice: the retry answers 200 with the same loan
 POST {{host}}/better/loans/{{loanId}}/return
+
+### ================================================================================================
+### Selling books: idempotent purchase, external payment, receipt (lessons/selling-books-lessons.md)
+### The payment gateway runs from compose.yaml on port 9091. Each scenario resets the shop and it.
+### ================================================================================================
+
+### Every answer of the provider, a sold-out book skipped, nothing in stock (better version)
+POST {{host}}/scenarios/purchase-outcomes
+
+### Lesson 1 — ten requests with one key: look for the key, create if missing
+POST {{host}}/scenarios/purchase-key-naive
+
+### Lesson 1 — ten requests with one key: unique key row, wait for the answer
+POST {{host}}/scenarios/purchase-key-better
+
+### Lesson 2 — 80 purchases, provider 1.5 s: the HTTP call inside the transaction holds the pool
+# @timeout 60
+POST {{host}}/scenarios/purchase-pool-naive
+
+### Lesson 2 — 80 purchases, provider 1.5 s: short transactions, call outside any transaction
+# @timeout 60
+POST {{host}}/scenarios/purchase-pool-better
+
+### Lesson 3 — the provider charges but answers after the client's timeout: naive treats it as failed
+# @timeout 60
+POST {{host}}/scenarios/purchase-late-answer-naive
+
+### Lesson 3 — same, better: RECONCILE, then the retry with the same key settles it
+# @timeout 60
+POST {{host}}/scenarios/purchase-late-answer-better
+
+### Lesson 4 — a failure after the receipt: the naive message was already sent
+POST {{host}}/scenarios/receipt-failure-naive
+
+### Lesson 4 — same, better: receipt and message in one transaction, sent after the commit
+POST {{host}}/scenarios/receipt-failure-better
+
+### Lesson 5 — the application dies after the commit; the job sends the pending message once
+POST {{host}}/scenarios/receipt-restart-better
+
+### The purchase endpoint itself. Run it twice: the retry gets the same 201 and body.
+### Tokens: tok_ok, tok_reject (402), tok_fail (503), tok_pending (202), tok_slow (late answer).
+### Book 978-84-000041 is sold out: it is listed in skippedIsbns.
+POST {{host}}/better/purchases
+Idempotency-Key: demo-purchase-1
+Content-Type: application/json
+
+{"memberEmail": "member20@library.test", "isbns": ["978-84-000010", "978-84-000041", "978-84-000011"], "paymentToken": "tok_ok"}
+
+> {% client.global.set("purchaseLocation", response.headers.valueOf("Location")); %}
+
+### The purchase and its receipt
+GET {{host}}{{purchaseLocation}}
+
+### Same key, other books: 422 idempotency-key-reused
+POST {{host}}/better/purchases
+Idempotency-Key: demo-purchase-1
+Content-Type: application/json
+
+{"memberEmail": "member20@library.test", "isbns": ["978-84-000012"], "paymentToken": "tok_ok"}
+
+### No Idempotency-Key: 400
+POST {{host}}/better/purchases
+Content-Type: application/json
+
+{"memberEmail": "member20@library.test", "isbns": ["978-84-000012"], "paymentToken": "tok_ok"}
+
+### The gateway's own record of the charges (its admin API: for demonstrations, never for the shop)
+GET http://localhost:9091/admin/charges

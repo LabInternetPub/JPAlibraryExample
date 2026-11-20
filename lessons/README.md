@@ -24,6 +24,7 @@ follow the lessons.
 | [`reservation-expiry-lessons.md`](reservation-expiry-lessons.md) | Concurrent transitions of the same row (collect vs expire vs cancel vs return): the invariant, the time rule, lost updates between transitions, stale entities, conditional updates, lock order and deadlocks, `SKIP LOCKED`, side effects after the commit, a bounded sweep, idempotency. |
 | [`conditional-update-vs-select-lock.md`](conditional-update-vs-select-lock.md) | One small example (returning a loan) solved in the two correct ways, `SELECT … FOR UPDATE` vs a conditional `UPDATE`, side by side. |
 | [`collect-expiry-lock-vs-conditional.md`](collect-expiry-lock-vs-conditional.md) | The same two ways on the real code of the project (collect vs expire), with the measured scenarios. |
+| [`selling-books-lessons.md`](selling-books-lessons.md) | The library sells books: an idempotent purchase (one key, ten requests), an external payment provider called with `RestClient`, a slow provider that exhausts the connection pool, the late answer and reconciliation, the receipt and its message through an outbox. |
 
 ## Recommended reading order
 
@@ -72,7 +73,13 @@ when several requests arrive at once.
      comparison on the project's code. Run its two scenarios (`collect-expiry-locked`,
      `collect-expiry-conditional`).
 
-7. **Wrap up.** [`reservation-expiry-lessons.md`](reservation-expiry-lessons.md), sections **4–9**:
+7. **Selling books.** [`selling-books-lessons.md`](selling-books-lessons.md): sections 1–3 (the
+   problem, the background, the two versions), then lessons 1–5 in order, and run their scenarios.
+   It reuses the conditional update of the last copy and the transaction boundaries of the expiry
+   lessons, and adds what changes when part of the work happens outside the database: a network
+   call, a payment, a message.
+
+8. **Wrap up.** [`reservation-expiry-lessons.md`](reservation-expiry-lessons.md), sections **4–9**:
    the better solution in one page, reflexes that don't work, how it's tested, the checklist of
    common mistakes, the questions to check your understanding, and the glossary. Try the questions
    before rereading. If one is hard, it points you to the lesson to revisit.

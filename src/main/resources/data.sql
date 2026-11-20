@@ -127,3 +127,19 @@ select gen_random_uuid(), br.id, b.id, 'N' || lpad(n::text, 4, '0'), 1, '1-' || 
 from generate_series(1, 30) as n
 join branch br on br.name = 'North'
 join book b on b.isbn = '978-84-' || lpad(n::text, 6, '0');
+
+-- The shop: books for sale (selling-books lesson) ---------------------------------------------
+-- Books 1-40: 9.00 EUR + 0.50 EUR x n, 100 copies each. Book 41 is offered but sold out.
+-- The Last Copy: a single copy for sale.
+insert into book_offer (id, book_id, price_cents, stock)
+select gen_random_uuid(), b.id, 900 + 50 * n, 100
+from generate_series(1, 40) as n
+join book b on b.isbn = '978-84-' || lpad(n::text, 6, '0');
+
+insert into book_offer (id, book_id, price_cents, stock)
+select gen_random_uuid(), b.id, 2950, 0
+from book b where b.isbn = '978-84-000041';
+
+insert into book_offer (id, book_id, price_cents, stock)
+select gen_random_uuid(), b.id, 1999, 1
+from book b where b.isbn = '978-84-999999';

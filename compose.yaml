@@ -8,3 +8,13 @@ services:
     # Host port 5433, so it can run next to another project that uses 5432.
     ports:
       - "5433:5432"
+
+  # The simulated payment provider of the book shop (selling-books lesson). A separate Spring Boot
+  # application, built from fake-payment-gateway/ the first time it starts (a few minutes).
+  # No callback URL is configured, so it never sends webhooks. Host port 9091, so it can run next
+  # to the Affora project's gateway on 9090.
+  payment-gateway:
+    build: ./fake-payment-gateway
+    image: library-fake-gateway:local
+    ports:
+      - "9091:9090"

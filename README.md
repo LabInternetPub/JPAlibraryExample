@@ -1,7 +1,9 @@
 # Library example: performance and contention with JPA
 
 A small Spring Boot application, set in a public library, that demonstrates the concepts of
-Deliverable 2: the N+1 problem, projections, bulk writes, lost updates and write skew. Every
+Deliverable 2: the N+1 problem, projections, bulk writes, lost updates and write skew. It also
+sells books, to demonstrate an idempotent purchase, an unreliable external payment provider called
+with Spring's `RestClient`, and a receipt sent through an outbox. Every
 concept is implemented twice, side by side: a **naive** version, which works for one user and a
 little data, and a **better** version. Each version has a **scenario** that runs it, measures it
 and prints a report, so the two can be compared in class.
@@ -14,12 +16,15 @@ The lessons for students are in [`lessons/`](lessons/) (start with
 ## Requirements
 
 - Java 25 (the Maven wrapper downloads Maven).
-- Docker running. The application starts PostgreSQL 17 from `compose.yaml` by itself.
+- Docker running. The application starts PostgreSQL 17 and the fake payment gateway from
+  `compose.yaml` by itself. The first start builds the gateway's image from
+  `fake-payment-gateway/` (a few minutes).
 - To send the requests in `scenarios.http`: IntelliJ IDEA's HTTP client, or the VS Code
   REST Client extension.
 
 The application listens on port **8080**. PostgreSQL is mapped to port **5433**, so it does not
-clash with another PostgreSQL on the default port 5432.
+clash with another PostgreSQL on the default port 5432, and the payment gateway to port **9091**,
+so it does not clash with the Affora project's gateway on 9090.
 
 ## Start the application
 
@@ -35,6 +40,9 @@ example data, so every start begins from the same data:
 | Central | 20,000 copies of 300 books, with loans and reservations (100 of them already expired) | Shelf map |
 | North | The bestseller (`N-BEST`, a single copy) and 30 ordinary copies (`N0001`–`N0030`) | Reservation, member limit |
 | Annex | Empty | Import |
+
+The shop sells books 1–40 (`978-84-000001` … `978-84-000040`, 9.50 € to 29.00 €, 100 copies
+each), *The Last Copy* (one copy) and book 41 (`978-84-000041`, sold out).
 
 There are also 321 books, 60 scenario members (`member01@library.test` … `member60@library.test`)
 with no loans or reservations, and 500 readers who own Central's loans and reservations.
@@ -100,6 +108,14 @@ expiry, collection and return. Its scenarios are the "Expiry" requests of `scena
 - Lesson 10: Designing the sweep: one big transaction or many small ones
 - Lesson 11: A retried return, idempotency, and full-row updates
 
+**[`lessons/selling-books-lessons.md`](lessons/selling-books-lessons.md)**: selling books. An
+idempotent purchase (one key, ten requests), the payment provider called with `RestClient` (explicit
+timeouts, every status mapped), the slow provider that exhausts the connection pool, the late answer
+and reconciliation, the receipt and its message through an outbox. Scenarios `purchase-outcomes`,
+`purchase-key-*`, `purchase-pool-*`, `purchase-late-answer-*`, `receipt-failure-*`,
+`receipt-restart-better`. The design is in
+[`design/purchase-payment-receipt.md`](design/purchase-payment-receipt.md).
+
 **[`lessons/conditional-update-vs-select-lock.md`](lessons/conditional-update-vs-select-lock.md)**:
 the two correct ways to let only one transaction perform a transition (`SELECT … FOR UPDATE` vs a
 conditional `UPDATE`), on the return of a loan.
@@ -130,7 +146,9 @@ watch the locks while a scenario runs.
 
 The tests run against PostgreSQL in Testcontainers (Docker must be running). They are examples
 of how each concept is tested: domain rules, statement counts, concurrency with real
-transactions, privacy of responses, and the endpoints. They are not the demonstration.
+transactions, privacy of responses, and the endpoints. The selling-books tests also start the
+payment gateway in a container, built from `fake-payment-gateway/` (the first build takes a few
+minutes; Docker caches it). They are not the demonstration.
 
 ## Troubleshooting
 
@@ -138,7 +156,11 @@ transactions, privacy of responses, and the endpoints. They are not the demonstr
   project on 8080), or change `server.port` in `application.properties` (and `@host` in
   `scenarios.http`) or the port mapping in `compose.yaml`.
 - **The application cannot start PostgreSQL:** check that Docker is running. `docker compose ps`
-  shows the container.
+  shows the containers.
+- **The selling-books scenarios fail with "Connection refused" on port 9091:** the gateway is not
+  running. Spring Boot runs `docker compose up` only when *none* of the services of `compose.yaml`
+  is running: if PostgreSQL was left running from an earlier session, the gateway is not started.
+  Run `docker compose up -d` once.
 - **A concurrency scenario logs "Race window broken":** some thread never reached the barrier,
   usually because the connection pool is too small. The pool is set to 60 connections, enough
   for the fifty simultaneous reservations.
@@ -159,6 +181,10 @@ src/main/java/cat/tecnocampus/library
 ├── expiry        reservation expiry lessons: collect, cancel and expire (naive, locking, conditional),
 │                 the sweep and its scheduler, expiry notices, scenarios
 ├── loan          return of a loan (naive and conditional), the retried-return lesson
+├── shop          selling books: naive and better purchase, its steps (prepare, claim, charge, finish),
+│                 controller, scenarios, the gateway's admin client for the scenarios
+├── payment       the payment provider over HTTP with RestClient (timeouts, status mapping)
+├── receipt       receipt messages: the outbox delivery, the dispatcher and its scheduled job
 ├── web           ProblemDetailsHandler (errors as application/problem+json)
 └── scenario      Scenario, ScenarioRunner, ScenarioController, Measurement, RaceWindow, ...
 ```

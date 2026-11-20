@@ -45,6 +45,8 @@ public class TransitionPauses {
     public static final String RETURN_READ = "return-read";
     public static final String RESERVE_MEMBER_LOCKED = "reserve-member-locked";
     public static final String SWEEP_CANDIDATES_READ = "sweep-candidates-read";
+    /** Selling books: a paid purchase's receipt is issued, its transaction has not committed. Keyed by member id. */
+    public static final String RECEIPT_ISSUED = "receipt-issued";
 
     private static final Logger log = LoggerFactory.getLogger(TransitionPauses.class);
     private static final long TIMEOUT_SECONDS = 15;
