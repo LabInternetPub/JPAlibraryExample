@@ -26,7 +26,6 @@ class RestClientPaymentGatewayTest {
     @Autowired PaymentGateway gateway;
     @Autowired GatewayAdmin admin;
     @Autowired RestClient.Builder builder;
-    @Autowired PaymentGatewayProperties properties;
 
     @BeforeEach
     void freshGateway() {
@@ -44,14 +43,12 @@ class RestClientPaymentGatewayTest {
         Reply ok = gateway.charge(charge("tok_ok"));
         Reply rejected = gateway.charge(charge("tok_reject"));
         Reply failed = gateway.charge(charge("tok_fail"));
-        Reply pending = gateway.charge(charge("tok_pending"));
 
         // Then
         assertThat(ok.outcome()).isEqualTo(Outcome.SUCCEEDED);
         assertThat(ok.providerRef()).startsWith("ch_");
         assertThat(rejected.outcome()).isEqualTo(Outcome.DECLINED);
-        assertThat(failed.outcome()).isEqualTo(Outcome.RETRYABLE);
-        assertThat(pending.outcome()).isEqualTo(Outcome.UNKNOWN);
+        assertThat(failed.outcome()).isEqualTo(Outcome.FAILED);
     }
 
     @Test
@@ -69,8 +66,8 @@ class RestClientPaymentGatewayTest {
     }
 
     @Test
-    void anAnswerLaterThanTheReadTimeoutIsUnknownAndTheProviderChargedAnyway() throws InterruptedException {
-        // Given: the provider answers after 2.5 s, the client waits 2 s
+    void aSlowAnswerIsWaitedFor() {
+        // Given: the provider answers after 2.5 s (there is no read timeout)
         admin.slowResponseMillis(2_500);
         Charge charge = charge("tok_slow");
 
@@ -80,19 +77,18 @@ class RestClientPaymentGatewayTest {
         Duration waited = Duration.ofNanos(System.nanoTime() - start);
 
         // Then
-        assertThat(reply.outcome()).isEqualTo(Outcome.UNKNOWN);
-        assertThat(waited).isBetween(properties.readTimeout(), properties.readTimeout().plusSeconds(1));
-        Thread.sleep(1_000);
+        assertThat(reply.outcome()).isEqualTo(Outcome.SUCCEEDED);
+        assertThat(waited).isGreaterThanOrEqualTo(Duration.ofMillis(2_500));
         assertThat(admin.chargesFor(charge.reference())).isEqualTo(1);
     }
 
     @Test
-    void aProviderThatCannotBeReachedIsRetryable() {
+    void aProviderThatCannotBeReachedIsAFailure() {
         // Given: nothing listens on port 1
         PaymentGateway unreachable = new RestClientPaymentGateway(builder,
-                new PaymentGatewayProperties("http://localhost:1", Duration.ofSeconds(1), Duration.ofSeconds(2)));
+                new PaymentGatewayProperties("http://localhost:1", Duration.ofSeconds(1)));
 
         // When / Then
-        assertThat(unreachable.charge(charge("tok_ok")).outcome()).isEqualTo(Outcome.RETRYABLE);
+        assertThat(unreachable.charge(charge("tok_ok")).outcome()).isEqualTo(Outcome.FAILED);
     }
 }

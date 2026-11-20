@@ -130,7 +130,7 @@ class BetterPurchaseTest {
     // ---- UC-19: the provider's answers ----------------------------------------------------------
 
     @Test
-    void aDeclineReleasesTheCopiesOnceAndIsReplayed() {
+    void aDeclineFailsThePurchaseReleasesTheCopiesOnceAndIsReplayed() {
         // When
         PurchaseAnswer answer = purchases.purchase(buy("k1", "tok_reject", isbn(1)));
         PurchaseAnswer retry = purchases.purchase(buy("k1", "tok_reject", isbn(1)));
@@ -141,63 +141,52 @@ class BetterPurchaseTest {
         assertThat(retry).isEqualTo(answer);
         assertThat(demo.taken(isbn(1))).isZero();      // released once, not twice
         assertThat(demo.receiptsOf(ANNA)).isZero();
+        assertThat(demo.gateway().charges()).singleElement()      // recorded as REJECTED: no money taken
+                .satisfies(charge -> assertThat(charge.status()).isEqualTo("REJECTED"));
     }
 
     @Test
-    void threeServerErrorsReleaseTheCopiesWithoutAnyCharge() {
+    void aGatewayFailureFailsThePurchaseAndReleasesTheCopiesWithoutRetrying() {
         PurchaseAnswer answer = purchases.purchase(buy("k1", "tok_fail", isbn(1)));
+        PurchaseAnswer retry = purchases.purchase(buy("k1", "tok_fail", isbn(1)));
 
         assertThat(answer.httpStatus()).isEqualTo(503);
         assertThat(answer.body().status()).isEqualTo(PurchaseStatus.PAYMENT_FAILED);
+        assertThat(retry).isEqualTo(answer);           // settled: the same key does not charge again
         assertThat(demo.taken(isbn(1))).isZero();
+        assertThat(demo.receiptsOf(ANNA)).isZero();
         assertThat(demo.gateway().charges()).isEmpty();
     }
 
     @Test
-    void aTemporaryFailureIsRetriedWithTheSameProviderKeyAndChargedOnce() {
-        // Given: the provider fails half of the requests
-        demo.gateway().failureRate(0.5);
+    void aSuccessfulChargeIsTakenExactlyOnce() {
+        PurchaseAnswer answer = purchases.purchase(buy("k1", "tok_ok", isbn(1)));
+        purchases.purchase(buy("k1", "tok_ok", isbn(1)));
 
-        // When: twenty purchases
+        assertThat(answer.httpStatus()).isEqualTo(201);
+        assertThat(demo.gateway().charges()).singleElement()
+                .satisfies(charge -> assertThat(charge.reference()).isEqualTo(answer.body().id().toString()));
+        assertThat(demo.taken(isbn(1))).isEqualTo(1);
+    }
+
+    @Test
+    void withAProviderFailingThirtyPercentNoCopyIsLostAndNoChargeDuplicated() {
+        // Given
+        demo.gateway().failureRate(0.3);
+
+        // When: twenty purchases, one book each
         List<PurchaseAnswer> answers = new java.util.ArrayList<>();
         for (int i = 0; i < 20; i++) {
             answers.add(purchases.purchase(buy("k" + i, "tok_ok", isbn(1 + i))));
         }
 
-        // Then: each one is paid (3 calls each) or definitively failed; never charged twice
-        long paid = answers.stream().filter(a -> a.httpStatus() == 201).count();
+        // Then: each one is paid or failed; a paid one keeps its copy, a failed one gave it back
         assertThat(answers).allMatch(a -> a.httpStatus() == 201 || a.httpStatus() == 503);
+        for (int i = 0; i < 20; i++) {
+            assertThat(demo.taken(isbn(1 + i))).isEqualTo(answers.get(i).httpStatus() == 201 ? 1 : 0);
+        }
+        long paid = answers.stream().filter(a -> a.httpStatus() == 201).count();
         assertThat(demo.gateway().charges()).hasSize((int) paid);
-        assertThat(paid).isGreaterThan(10);   // 1 − 0.5³ = 87.5 % expected
-    }
-
-    @Test
-    void aPendingPaymentIsNeverCancelledByGuesswork() {
-        PurchaseAnswer answer = purchases.purchase(buy("k1", "tok_pending", isbn(1)));
-
-        assertThat(answer.httpStatus()).isEqualTo(202);
-        assertThat(answer.body().status()).isEqualTo(PurchaseStatus.RECONCILE);
-        assertThat(demo.taken(isbn(1))).isEqualTo(1);
-        assertThat(demo.receiptsOf(ANNA)).isZero();
-    }
-
-    @Test
-    void aLateAnswerIsReconciledAndTheRetrySettlesItWithOneCharge() throws InterruptedException {
-        // Given: the provider charges but answers after the read timeout (2 s)
-        demo.gateway().slowResponseMillis(2_500);
-
-        // When
-        PurchaseAnswer first = purchases.purchase(buy("late", "tok_slow", isbn(1)));
-        Thread.sleep(1_000);                       // the provider finishes and charges
-        PurchaseAnswer retry = purchases.purchase(buy("late", "tok_slow", isbn(1)));
-
-        // Then
-        assertThat(first.httpStatus()).isEqualTo(202);
-        assertThat(first.body().status()).isEqualTo(PurchaseStatus.RECONCILE);
-        assertThat(retry.httpStatus()).isEqualTo(201);
-        assertThat(retry.body().receipt()).isNotNull();
-        assertThat(demo.gateway().charges()).hasSize(1);
-        assertThat(demo.taken(isbn(1))).isEqualTo(1);
     }
 
     @Test
@@ -238,16 +227,16 @@ class BetterPurchaseTest {
         // When
         PurchaseAnswer answer = purchases.purchase(buy("k1", "tok_ok", isbn(1)));
 
-        // Then: the money moved, so the purchase is kept for reconciliation, without receipt or message
+        // Then: nothing was recorded; the purchase is still pending, with its copy, without receipt or message
         assertThat(answer.httpStatus()).isEqualTo(202);
-        assertThat(answer.body().status()).isEqualTo(PurchaseStatus.RECONCILE);
+        assertThat(answer.body().status()).isEqualTo(PurchaseStatus.PAYMENT_PENDING);
         assertThat(demo.receiptsOf(ANNA)).isZero();
         assertThat(demo.mailsTo(ANNA)).isZero();
         assertThat(demo.pendingMessages()).isZero();
         assertThat(demo.gateway().charges()).hasSize(1);
         assertThat(demo.taken(isbn(1))).isEqualTo(1);
 
-        // and the retry settles it with the same charge
+        // and the retry settles it with the same charge (same provider key: the provider replays its 201)
         PurchaseAnswer retry = purchases.purchase(buy("k1", "tok_ok", isbn(1)));
         assertThat(retry.httpStatus()).isEqualTo(201);
         assertThat(demo.gateway().charges()).hasSize(1);

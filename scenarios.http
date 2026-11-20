@@ -230,25 +230,17 @@ POST {{host}}/scenarios/purchase-pool-naive
 # @timeout 60
 POST {{host}}/scenarios/purchase-pool-better
 
-### Lesson 3 — the provider charges but answers after the client's timeout: naive treats it as failed
-# @timeout 60
-POST {{host}}/scenarios/purchase-late-answer-naive
-
-### Lesson 3 — same, better: RECONCILE, then the retry with the same key settles it
-# @timeout 60
-POST {{host}}/scenarios/purchase-late-answer-better
-
-### Lesson 4 — a failure after the receipt: the naive message was already sent
+### Lesson 3 — a failure after the receipt: the naive message was already sent
 POST {{host}}/scenarios/receipt-failure-naive
 
-### Lesson 4 — same, better: receipt and message in one transaction, sent after the commit
+### Lesson 3 — same, better: receipt and message in one transaction, sent after the commit
 POST {{host}}/scenarios/receipt-failure-better
 
-### Lesson 5 — the application dies after the commit; the job sends the pending message once
+### Lesson 4 — the application dies after the commit; the job sends the pending message once
 POST {{host}}/scenarios/receipt-restart-better
 
 ### The purchase endpoint itself. Run it twice: the retry gets the same 201 and body.
-### Tokens: tok_ok, tok_reject (402), tok_fail (503), tok_pending (202), tok_slow (late answer).
+### Tokens: tok_ok, tok_reject (402 DECLINED), tok_fail (503 PAYMENT_FAILED, not retried).
 ### Book 978-84-000041 is sold out: it is listed in skippedIsbns.
 POST {{host}}/better/purchases
 Idempotency-Key: demo-purchase-1

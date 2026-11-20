@@ -5,7 +5,7 @@ import java.util.UUID;
 
 /**
  * The external payment provider, as the shop sees it. One call, one {@link Reply}: the adapter
- * turns statuses, bodies, timeouts and exceptions into four outcomes, and never throws.
+ * turns statuses, bodies and exceptions into three outcomes, and never throws.
  */
 public interface PaymentGateway {
 
@@ -15,7 +15,8 @@ public interface PaymentGateway {
      * @param reference      the purchase id; the provider echoes it back, and the answer is accepted
      *                       only if it matches
      * @param idempotencyKey sent as the {@code Idempotency-Key} header. The same key on every attempt
-     *                       of the same purchase: the provider then charges at most once
+     *                       of the same purchase (the purchase id): the provider then charges at
+     *                       most once, and answers a repeated key with its stored answer
      */
     record Charge(long amountCents, String currency, String paymentToken, UUID reference, String idempotencyKey) {
 
@@ -33,12 +34,13 @@ public interface PaymentGateway {
     enum Outcome {
         /** 201 with the same amount, currency and reference, and a provider reference. */
         SUCCEEDED,
-        /** 402: refused. Definitive, never retried. */
+        /** 402: refused. */
         DECLINED,
-        /** 503, or a connection that was never opened: the provider recorded nothing. Safe to retry. */
-        RETRYABLE,
-        /** Anything else: timeout, 202, malformed or mismatching body. Money may have been taken. */
-        UNKNOWN
+        /**
+         * Anything else: a 503 (the provider failed and recorded nothing), or no usable answer. The
+         * purchase fails; the shop does not retry.
+         */
+        FAILED
     }
 
     /**

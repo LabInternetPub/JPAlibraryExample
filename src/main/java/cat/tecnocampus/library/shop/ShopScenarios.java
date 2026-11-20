@@ -25,7 +25,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
-import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -49,9 +48,6 @@ class ShopScenarios {
     private static final long POOL_PROBE_AFTER_MS = 300;
     // The catalogue read is measured as a client that gives up after this long would see it.
     private static final long CLIENT_PATIENCE_MS = 500;
-
-    // Lesson 3: the provider answers after the client has given up (read timeout 2 s).
-    private static final long LATE_PROVIDER_DELAY_MS = 3_000;
 
     private final ShopDemo demo;
     private final NaivePurchaseService naive;
@@ -147,7 +143,7 @@ class ShopScenarios {
                 "80 purchases while the provider takes 1.5 s; short transactions, the call outside any transaction",
                 scenario -> pool(scenario, better::purchase)
                         .note("While the purchases wait for the provider, they hold no connection: the pool is free.")
-                        .note("Same pool, same provider, same timeouts: only the lifetime of the connection changed.")
+                        .note("Same pool, same provider: only the lifetime of the connection changed.")
                         .build());
     }
 
@@ -210,59 +206,7 @@ class ShopScenarios {
         }
     }
 
-    // ---- Lesson 3: the late answer -----------------------------------------------------------
-
-    @Bean
-    Scenario purchaseLateAnswerNaive() {
-        return new SimpleScenario("purchase-late-answer-naive", LESSON,
-                "The provider charges the card but answers after 3 s; the shop gives up at 2 s and treats it as a failure",
-                scenario -> lateAnswer(scenario, naive::purchase)
-                        .note("The shop said 'payment failed' and put the book back on sale; the provider charged the card.")
-                        .note("A retry with the same key finds the failed purchase: the member paid and has nothing.")
-                        .build());
-    }
-
-    @Bean
-    Scenario purchaseLateAnswerBetter() {
-        return new SimpleScenario("purchase-late-answer-better", LESSON,
-                "The provider charges the card but answers after 3 s; the shop gives up at 2 s and treats it as unknown",
-                scenario -> lateAnswer(scenario, better::purchase)
-                        .note("A timeout proves nothing: RECONCILE (202), and the book stays taken.")
-                        .note("The retry sends the same provider key; the provider replays its stored answer: "
-                                + "PAID, one receipt, one charge.")
-                        .build());
-    }
-
-    private ScenarioReport.Builder lateAnswer(Scenario scenario, Function<PurchaseCommand, PurchaseAnswer> buy) {
-        demo.reset();
-        demo.gateway().slowResponseMillis(LATE_PROVIDER_DELAY_MS);
-        String member = "member01@library.test";
-        PurchaseCommand command = new PurchaseCommand(member, "late-1", List.of(ShopDemo.isbn(1)), "tok_slow");
-
-        long start = System.nanoTime();
-        Attempt<PurchaseAnswer> first = once(() -> buy.apply(command));
-        String firstTime = millisSince(start);
-        UUID purchaseId = first.succeeded() ? first.value().body().id() : null;
-        String afterFirst = purchaseId == null ? "no purchase" : demo.status(purchaseId);
-        int takenAfterFirst = demo.taken(ShopDemo.isbn(1));
-
-        sleep(LATE_PROVIDER_DELAY_MS - 1_500);          // the provider finishes its 3 s and charges
-        long chargesMeanwhile = demo.gateway().charges().size();
-
-        Attempt<PurchaseAnswer> retry = once(() -> buy.apply(command));
-        return ScenarioReport.of(scenario)
-                .result("first request", outcome(first) + " after " + firstTime)
-                .result("purchase after the first request", afterFirst)
-                .result("copies taken after the first request", takenAfterFirst)
-                .result("charges at the gateway once it has answered", chargesMeanwhile)
-                .result("retry with the same key", outcome(retry))
-                .result("purchase after the retry", purchaseId == null ? "no purchase" : demo.status(purchaseId))
-                .result("copies taken after the retry", demo.taken(ShopDemo.isbn(1)))
-                .result("receipts", demo.receiptsOf(member))
-                .result("charges at the gateway at the end", demo.gateway().charges().size());
-    }
-
-    // ---- Lesson 4: a failure after the charge ------------------------------------------------
+    // ---- Lesson 3: a failure after the charge ------------------------------------------------
 
     @Bean
     Scenario receiptFailureNaive() {
@@ -280,8 +224,9 @@ class ShopScenarios {
                 "Something fails after the receipt is issued; receipt and message are written in one transaction, sent after the commit",
                 scenario -> receiptFailure(scenario, better::purchase)
                         .note("The failure rolled back the receipt and its message together: nothing sent.")
-                        .note("The provider had answered, so the purchase goes to RECONCILE, not FAILED; "
-                                + "the retry settles it: one receipt, one message, one charge.")
+                        .note("Nothing was recorded: the purchase is still PAYMENT_PENDING (202) with its copy. "
+                                + "The retry charges with the same provider key, the provider replays its answer: "
+                                + "one receipt, one message, one charge.")
                         .build());
     }
 
@@ -308,7 +253,7 @@ class ShopScenarios {
                                 + " / " + demo.gateway().charges().size());
     }
 
-    // ---- Lesson 5: a crash after the commit -------------------------------------------------
+    // ---- Lesson 4: a crash after the commit -------------------------------------------------
 
     @Bean
     Scenario receiptRestartBetter() {
@@ -352,14 +297,13 @@ class ShopScenarios {
                             List.of(ShopDemo.isbn(5), ShopDemo.SOLD_OUT_ISBN, ShopDemo.isbn(6))));
                     rows.put("tok_reject, book 7", outcomeCase("member11", "tok_reject", List.of(ShopDemo.isbn(7))));
                     rows.put("tok_fail, book 8", outcomeCase("member12", "tok_fail", List.of(ShopDemo.isbn(8))));
-                    rows.put("tok_pending, book 9", outcomeCase("member13", "tok_pending", List.of(ShopDemo.isbn(9))));
                     rows.put("tok_ok, sold-out 41 only", outcomeCase("member14", "tok_ok", List.of(ShopDemo.SOLD_OUT_ISBN)));
                     ScenarioReport.Builder report = ScenarioReport.of(scenario);
                     rows.forEach(report::result);
                     return report
                             .result("charges at the gateway", demo.gateway().charges().size())
-                            .note("Declined and failed purchases gave their copies back; the pending one keeps them.")
-                            .note("tok_fail: three calls, all 503, nothing recorded at the gateway.")
+                            .note("Declined and failed purchases gave their copies back.")
+                            .note("tok_fail: one call, 503, nothing recorded at the gateway, not retried.")
                             .build();
                 });
     }

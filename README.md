@@ -109,11 +109,11 @@ expiry, collection and return. Its scenarios are the "Expiry" requests of `scena
 - Lesson 11: A retried return, idempotency, and full-row updates
 
 **[`lessons/selling-books-lessons.md`](lessons/selling-books-lessons.md)**: selling books. An
-idempotent purchase (one key, ten requests), the payment provider called with `RestClient` (explicit
-timeouts, every status mapped), the slow provider that exhausts the connection pool, the late answer
-and reconciliation, the receipt and its message through an outbox. Scenarios `purchase-outcomes`,
-`purchase-key-*`, `purchase-pool-*`, `purchase-late-answer-*`, `receipt-failure-*`,
-`receipt-restart-better`. The design is in
+idempotent purchase (one key, ten requests), the payment provider called with `RestClient` (every
+status mapped; a decline or a failure fails the purchase, no retry), the main lesson that no call to
+the provider happens inside a database transaction (the slow provider that exhausts the connection
+pool), the receipt and its message through an outbox. Scenarios `purchase-outcomes`,
+`purchase-key-*`, `purchase-pool-*`, `receipt-failure-*`, `receipt-restart-better`. The design is in
 [`design/purchase-payment-receipt.md`](design/purchase-payment-receipt.md).
 
 **[`lessons/conditional-update-vs-select-lock.md`](lessons/conditional-update-vs-select-lock.md)**:
@@ -183,7 +183,7 @@ src/main/java/cat/tecnocampus/library
 ├── loan          return of a loan (naive and conditional), the retried-return lesson
 ├── shop          selling books: naive and better purchase, its steps (prepare, claim, charge, finish),
 │                 controller, scenarios, the gateway's admin client for the scenarios
-├── payment       the payment provider over HTTP with RestClient (timeouts, status mapping)
+├── payment       the payment provider over HTTP with RestClient (connect timeout, status mapping)
 ├── receipt       receipt messages: the outbox delivery, the dispatcher and its scheduled job
 ├── web           ProblemDetailsHandler (errors as application/problem+json)
 └── scenario      Scenario, ScenarioRunner, ScenarioController, Measurement, RaceWindow, ...

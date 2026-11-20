@@ -6,11 +6,8 @@ public enum StockAction {
     /** Paid: the copies are sold for good, and the receipt is issued. */
     SELL,
 
-    /** Proven that no money was taken: the copies go back on sale. */
+    /** Declined or failed: no money was taken, the copies go back on sale. */
     RELEASE,
-
-    /** Not known whether money was taken: the copies stay taken. Never released by guesswork. */
-    RETAIN,
 
     /** This attempt has lost its right to decide (another attempt took over): do nothing. */
     NONE

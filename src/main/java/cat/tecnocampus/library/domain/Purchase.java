@@ -25,7 +25,7 @@ import java.util.UUID;
  *
  * <p>The rules of the payment are here, not in the services: who may charge right now
  * ({@link #claimPayment}), what an answer of the provider means for the purchase and for its stock
- * ({@link #settle}), and what a failure after the provider answered means ({@link #localFailure}).
+ * ({@link #settle}), and what to do when recording the answer fails ({@link #abandonAttempt}).
  * The services only lock the row, call these methods and apply the result.
  *
  * <p>There is no payment table: a purchase has at most one payment, and its state fits in a few
@@ -37,13 +37,11 @@ public class Purchase {
     public static final String CURRENCY = "EUR";
 
     /**
-     * How long an attempt may take before another one is allowed to take over. Longer than the
-     * worst attempt: 3 calls × (1 s connect + 3 s read) + backoff.
+     * How long an attempt may take before another one is allowed to take over: far longer than the
+     * provider normally takes. It is what lets a purchase move on when the process that was charging
+     * it died while waiting for the provider.
      */
     public static final Duration PAYMENT_LEASE = Duration.ofSeconds(15);
-
-    /** When a person must look at a purchase whose payment is still unknown. */
-    public static final Duration REVIEW_AFTER = Duration.ofHours(24);
 
     @Id
     private UUID id;
@@ -90,12 +88,6 @@ public class Purchase {
 
     private Instant leaseUntil;
 
-    // True once any attempt may have moved money without the shop knowing (unknown answer, or an
-    // attempt that never came back). From then on, "the provider recorded nothing" proves nothing.
-    private boolean earlierAttemptUnknown;
-
-    private Instant reviewAfter;
-
     private int paymentAttempts;
 
     protected Purchase() {
@@ -139,7 +131,8 @@ public class Purchase {
      *   <li>settled: there is nothing to charge, the answer is already decided;</li>
      *   <li>another attempt holds a live lease: busy, wait for its answer;</li>
      *   <li>otherwise: a new lease with a fresh nonce. If an earlier lease is still recorded, that
-     *       attempt never finished: it may have charged, so it counts as an unknown outcome.</li>
+     *       attempt never finished (its process died while waiting for the provider): the new
+     *       attempt takes over, and charges with the same provider key.</li>
      * </ul>
      */
     public PaymentClaim claimPayment(Instant now) {
@@ -148,9 +141,6 @@ public class Purchase {
         }
         if (paymentLease != null && now.isBefore(leaseUntil)) {
             return PaymentClaim.busy();
-        }
-        if (paymentLease != null) {
-            earlierAttemptUnknown = true;
         }
         paymentLease = UUID.randomUUID();
         leaseUntil = now.plus(PAYMENT_LEASE);
@@ -163,7 +153,7 @@ public class Purchase {
      * stock. Only the attempt that holds the current lease may decide: an attempt that took too
      * long and was replaced changes nothing ({@link StockAction#NONE}), even if its answer arrives.
      */
-    public StockAction settle(UUID lease, PaymentEvidence evidence, Instant now) {
+    public StockAction settle(UUID lease, PaymentEvidence evidence) {
         if (!holdsLease(lease)) {
             return StockAction.NONE;
         }
@@ -178,37 +168,23 @@ public class Purchase {
                 status = PurchaseStatus.DECLINED;
                 yield StockAction.RELEASE;
             }
-            case UNRECORDED_FAILURE -> {
-                // "Nothing recorded" only speaks for these attempts. If an earlier one may have
-                // charged, releasing the stock could sell copies somebody has paid for.
-                if (earlierAttemptUnknown) {
-                    yield reconcile(now);
-                }
+            case FAILED -> {
                 status = PurchaseStatus.PAYMENT_FAILED;
                 yield StockAction.RELEASE;
             }
-            case UNKNOWN -> reconcile(now);
         };
     }
 
     /**
-     * The provider answered, but the shop failed to record the result (the completion threw).
-     * Money may have moved: the purchase waits for reconciliation, and the stock stays taken.
+     * The provider answered, but the shop failed to record the result (the completion threw and
+     * rolled back). The purchase stays {@code PAYMENT_PENDING} with its stock, and the lease is
+     * given up at once, so a retry with the same key does not wait for it to run out: the retry
+     * charges again with the same provider key, and the provider answers what it answered before.
      */
-    public void localFailure(UUID lease, Instant now) {
+    public void abandonAttempt(UUID lease) {
         if (holdsLease(lease)) {
             clearLease();
-            reconcile(now);
         }
-    }
-
-    private StockAction reconcile(Instant now) {
-        status = PurchaseStatus.RECONCILE;
-        earlierAttemptUnknown = true;
-        if (reviewAfter == null) {
-            reviewAfter = createdAt.plus(REVIEW_AFTER);
-        }
-        return StockAction.RETAIN;
     }
 
     private boolean holdsLease(UUID lease) {
@@ -229,7 +205,13 @@ public class Purchase {
         this.providerRef = Objects.requireNonNull(providerRef);
     }
 
-    /** Naive: anything that is not a 201 (a timeout too) means failed. That is the bug. */
+    /** Naive: the provider refused the card. */
+    public void markDeclined() {
+        requirePending();
+        this.status = PurchaseStatus.DECLINED;
+    }
+
+    /** Naive: the provider failed. */
     public void markFailed() {
         requirePending();
         this.status = PurchaseStatus.PAYMENT_FAILED;
@@ -281,14 +263,6 @@ public class Purchase {
 
     public String getProviderRef() {
         return providerRef;
-    }
-
-    public boolean isEarlierAttemptUnknown() {
-        return earlierAttemptUnknown;
-    }
-
-    public Instant getReviewAfter() {
-        return reviewAfter;
     }
 
     public int getPaymentAttempts() {

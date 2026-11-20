@@ -94,11 +94,12 @@ public class PurchaseService {
         try {
             completed = completion.finish(attempt, evidence);
         } catch (RuntimeException e) {
-            // The provider has answered, perhaps with "charged", and we could not record it.
-            // Releasing the stock now could sell copies somebody paid for: reconcile instead.
+            // The provider has answered, perhaps with "charged", and we could not record it. The
+            // purchase stays PAYMENT_PENDING (202): a retry with the same key asks the provider
+            // again with the same provider key and gets the same answer, without a second charge.
             log.warn("Recording the payment of purchase {} failed after the provider answered {}: {}",
                     attempt.purchaseId(), evidence.outcome(), e.toString());
-            completion.localFailure(attempt);
+            completion.abandon(attempt);
             return;
         }
         if (completed.receiptMessageId() != null) {

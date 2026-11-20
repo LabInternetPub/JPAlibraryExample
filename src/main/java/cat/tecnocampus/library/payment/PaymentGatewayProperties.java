@@ -6,32 +6,28 @@ import java.time.Duration;
 import java.util.Objects;
 
 /**
- * Where the payment provider is, and how long the shop waits for it.
+ * Where the payment provider is, and how long the shop waits to connect to it.
  *
- * <p>Both timeouts are mandatory and bounded. The JDK client that {@code RestClient} uses here has
- * no read timeout unless one is set: without it, a provider that never answers keeps the request
- * (and whatever it holds) forever. The bounds keep the worst attempt (3 calls) inside the payment
- * lease of {@code Purchase.PAYMENT_LEASE} (15 s): 3 × (1 s + 3 s) + backoff.
+ * <p>There is a connect timeout and <b>no read timeout</b>, on purpose. A connection that cannot be
+ * opened proves the request never left, so nothing was charged and the purchase can fail cleanly.
+ * A read timeout would give up on a request the provider already has, and may be charging: the
+ * shop would not know whether the money moved. This example leaves that case out (see the lesson),
+ * so once the request is sent, the shop waits for the answer.
  *
  * @param url            base URL of the provider
  * @param connectTimeout how long to wait for the TCP connection
- * @param readTimeout    how long to wait for the answer once the request is sent
  */
 @ConfigurationProperties(prefix = "library.payment")
-public record PaymentGatewayProperties(String url, Duration connectTimeout, Duration readTimeout) {
+public record PaymentGatewayProperties(String url, Duration connectTimeout) {
 
     static final Duration MAX_CONNECT_TIMEOUT = Duration.ofSeconds(1);
-    static final Duration MAX_READ_TIMEOUT = Duration.ofSeconds(3);
 
     public PaymentGatewayProperties {
         Objects.requireNonNull(url, "library.payment.url");
-        requireWithin(connectTimeout, MAX_CONNECT_TIMEOUT, "library.payment.connect-timeout");
-        requireWithin(readTimeout, MAX_READ_TIMEOUT, "library.payment.read-timeout");
-    }
-
-    private static void requireWithin(Duration timeout, Duration max, String name) {
-        if (timeout == null || timeout.isNegative() || timeout.isZero() || timeout.compareTo(max) > 0) {
-            throw new IllegalArgumentException(name + " must be positive and at most " + max);
+        if (connectTimeout == null || connectTimeout.isNegative() || connectTimeout.isZero()
+                || connectTimeout.compareTo(MAX_CONNECT_TIMEOUT) > 0) {
+            throw new IllegalArgumentException("library.payment.connect-timeout must be positive and at most "
+                    + MAX_CONNECT_TIMEOUT);
         }
     }
 }

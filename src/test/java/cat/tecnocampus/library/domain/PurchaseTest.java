@@ -67,14 +67,14 @@ class PurchaseTest {
         UUID lease = grantedLease(purchase, NOW);
 
         // When
-        StockAction action = purchase.settle(lease, PaymentEvidence.accepted("ch_1"), NOW);
+        StockAction action = purchase.settle(lease, PaymentEvidence.accepted("ch_1"));
 
         // Then
         assertThat(action).isEqualTo(StockAction.SELL);
         assertThat(purchase.getStatus()).isEqualTo(PurchaseStatus.PAID);
         assertThat(purchase.getProviderRef()).isEqualTo("ch_1");
         assertThat(purchase.claimPayment(NOW.plusSeconds(1)).kind()).isEqualTo(PaymentClaim.Kind.SETTLED);
-        assertThat(purchase.settle(lease, PaymentEvidence.of(PaymentEvidence.Outcome.DECLINED), NOW))
+        assertThat(purchase.settle(lease, PaymentEvidence.of(PaymentEvidence.Outcome.DECLINED)))
                 .isEqualTo(StockAction.NONE);
         assertThat(purchase.getStatus()).isEqualTo(PurchaseStatus.PAID);
     }
@@ -84,101 +84,64 @@ class PurchaseTest {
         Purchase purchase = purchase();
         UUID lease = grantedLease(purchase, NOW);
 
-        StockAction action = purchase.settle(lease, PaymentEvidence.of(PaymentEvidence.Outcome.DECLINED), NOW);
+        StockAction action = purchase.settle(lease, PaymentEvidence.of(PaymentEvidence.Outcome.DECLINED));
 
         assertThat(action).isEqualTo(StockAction.RELEASE);
         assertThat(purchase.getStatus()).isEqualTo(PurchaseStatus.DECLINED);
     }
 
     @Test
-    void anUnrecordedFailureReleasesTheCopiesWhenNoEarlierAttemptIsInDoubt() {
+    void aGatewayFailureReleasesTheCopies() {
         Purchase purchase = purchase();
         UUID lease = grantedLease(purchase, NOW);
 
-        StockAction action = purchase.settle(lease, PaymentEvidence.of(PaymentEvidence.Outcome.UNRECORDED_FAILURE), NOW);
+        StockAction action = purchase.settle(lease, PaymentEvidence.of(PaymentEvidence.Outcome.FAILED));
 
         assertThat(action).isEqualTo(StockAction.RELEASE);
         assertThat(purchase.getStatus()).isEqualTo(PurchaseStatus.PAYMENT_FAILED);
+        assertThat(purchase.claimPayment(NOW.plusSeconds(1)).kind()).isEqualTo(PaymentClaim.Kind.SETTLED);
     }
 
     @Test
-    void anUnknownOutcomeKeepsTheCopiesAndAsksForReconciliation() {
+    void anAbandonedAttemptLosesItsRightToDecideOnceItsLeaseRunsOut() {
+        // Given: an attempt that never came back (the process died while waiting for the provider)
+        Purchase purchase = purchase();
+        UUID abandoned = grantedLease(purchase, NOW);
+        assertThat(purchase.claimPayment(NOW.plus(Purchase.PAYMENT_LEASE).minusSeconds(1)).kind())
+                .isEqualTo(PaymentClaim.Kind.BUSY);
+
+        // When: its lease runs out and a retry with the same key takes over
+        UUID takeover = grantedLease(purchase, NOW.plus(Purchase.PAYMENT_LEASE));
+
+        // Then: the old attempt changes nothing, even if it wakes up; the new one decides
+        assertThat(purchase.settle(abandoned, PaymentEvidence.of(PaymentEvidence.Outcome.DECLINED)))
+                .isEqualTo(StockAction.NONE);
+        assertThat(purchase.getStatus()).isEqualTo(PurchaseStatus.PAYMENT_PENDING);
+        assertThat(purchase.settle(takeover, PaymentEvidence.accepted("ch_1"))).isEqualTo(StockAction.SELL);
+        assertThat(purchase.getPaymentAttempts()).isEqualTo(2);
+    }
+
+    @Test
+    void anAttemptThatCouldNotRecordItsAnswerGivesUpItsLeaseAtOnce() {
         // Given
         Purchase purchase = purchase();
         UUID lease = grantedLease(purchase, NOW);
 
-        // When: a timeout
-        StockAction action = purchase.settle(lease, PaymentEvidence.of(PaymentEvidence.Outcome.UNKNOWN), NOW);
+        // When: recording the answer failed and rolled back
+        purchase.abandonAttempt(lease);
 
-        // Then
-        assertThat(action).isEqualTo(StockAction.RETAIN);
-        assertThat(purchase.getStatus()).isEqualTo(PurchaseStatus.RECONCILE);
-        assertThat(purchase.getReviewAfter()).isEqualTo(NOW.plus(Purchase.REVIEW_AFTER));
-    }
-
-    @Test
-    void afterAnUnknownOutcomeA503ProvesNothing() {
-        // Given: the first attempt timed out (it may have charged)
-        Purchase purchase = purchase();
-        purchase.settle(grantedLease(purchase, NOW), PaymentEvidence.of(PaymentEvidence.Outcome.UNKNOWN), NOW);
-
-        // When: the retry gets 503 three times
-        UUID retry = grantedLease(purchase, NOW.plusSeconds(30));
-        StockAction action = purchase.settle(retry, PaymentEvidence.of(PaymentEvidence.Outcome.UNRECORDED_FAILURE), NOW);
-
-        // Then: still unknown, never released
-        assertThat(action).isEqualTo(StockAction.RETAIN);
-        assertThat(purchase.getStatus()).isEqualTo(PurchaseStatus.RECONCILE);
-    }
-
-    @Test
-    void aRetryCanSettleAReconciledPurchase() {
-        Purchase purchase = purchase();
-        purchase.settle(grantedLease(purchase, NOW), PaymentEvidence.of(PaymentEvidence.Outcome.UNKNOWN), NOW);
-
-        UUID retry = grantedLease(purchase, NOW.plusSeconds(30));
-        StockAction action = purchase.settle(retry, PaymentEvidence.accepted("ch_late"), NOW.plusSeconds(30));
-
-        assertThat(action).isEqualTo(StockAction.SELL);
-        assertThat(purchase.getStatus()).isEqualTo(PurchaseStatus.PAID);
-    }
-
-    @Test
-    void anAbandonedAttemptLosesItsRightToDecideAndCountsAsUnknown() {
-        // Given: an attempt that never came back (the process died while charging)
-        Purchase purchase = purchase();
-        UUID abandoned = grantedLease(purchase, NOW);
-
-        // When: its lease runs out and another request takes over
-        UUID takeover = grantedLease(purchase, NOW.plus(Purchase.PAYMENT_LEASE));
-
-        // Then: the old attempt changes nothing, even if it wakes up
-        assertThat(purchase.settle(abandoned, PaymentEvidence.of(PaymentEvidence.Outcome.DECLINED), NOW))
-                .isEqualTo(StockAction.NONE);
-        assertThat(purchase.isEarlierAttemptUnknown()).isTrue();
-        // and a 503 for the new one cannot release copies the old one may have paid for
-        assertThat(purchase.settle(takeover, PaymentEvidence.of(PaymentEvidence.Outcome.UNRECORDED_FAILURE), NOW))
-                .isEqualTo(StockAction.RETAIN);
-    }
-
-    @Test
-    void aLocalFailureAfterTheProviderAnsweredIsReconciled() {
-        Purchase purchase = purchase();
-        UUID lease = grantedLease(purchase, NOW);
-
-        purchase.localFailure(lease, NOW);
-
-        assertThat(purchase.getStatus()).isEqualTo(PurchaseStatus.RECONCILE);
+        // Then: still pending, and a retry may charge right away
+        assertThat(purchase.getStatus()).isEqualTo(PurchaseStatus.PAYMENT_PENDING);
         assertThat(purchase.claimPayment(NOW.plusSeconds(1)).kind()).isEqualTo(PaymentClaim.Kind.GRANTED);
     }
 
     @Test
-    void theNaiveVersionTurnsAnyNon201IntoAFailure() {
+    void theNaiveVersionDecidesOnlyOnce() {
         Purchase purchase = purchase();
 
-        purchase.markFailed();
+        purchase.markDeclined();
 
-        assertThat(purchase.getStatus()).isEqualTo(PurchaseStatus.PAYMENT_FAILED);
+        assertThat(purchase.getStatus()).isEqualTo(PurchaseStatus.DECLINED);
         assertThatThrownBy(() -> purchase.markPaid("ch_1")).isInstanceOf(IllegalStateException.class);
     }
 
@@ -189,7 +152,7 @@ class PurchaseTest {
 
         // When / Then
         assertThatThrownBy(() -> Receipt.issueFor(purchase, NOW)).isInstanceOf(IllegalStateException.class);
-        purchase.settle(grantedLease(purchase, NOW), PaymentEvidence.accepted("ch_9"), NOW);
+        purchase.settle(grantedLease(purchase, NOW), PaymentEvidence.accepted("ch_9"));
         Receipt receipt = Receipt.issueFor(purchase, NOW.plus(Duration.ofSeconds(1)));
         assertThat(receipt.getTotalCents()).isEqualTo(1950);
         assertThat(receipt.getProviderRef()).isEqualTo("ch_9");

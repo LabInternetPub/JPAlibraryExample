@@ -26,7 +26,7 @@ import java.util.UUID;
  * The purchase as it is usually written first: one method, one transaction, the call to the
  * payment provider in the middle, the message sent as one more step.
  *
- * <p>It works for one member at a time with a provider that answers quickly. It has four defects,
+ * <p>It works for one member at a time with a provider that answers quickly. It has three defects,
  * each one the subject of a lesson (and of a scenario that shows it with numbers):
  * <ol>
  *   <li><b>Idempotency by check-then-act.</b> "Is there a purchase with this key? No: create one."
@@ -36,9 +36,6 @@ import java.util.UUID;
  *       from its first statement to its commit, so every purchase waiting for the provider keeps
  *       one connection busy doing nothing. With a slow provider the pool runs out, and requests that
  *       never talk to the provider (the catalogue) fail too.</li>
- *   <li><b>A timeout treated as a failure.</b> Anything but a 201 gives the stock back. A provider
- *       that charged the card but answered after our timeout leaves a member who paid for books
- *       that are back on sale.</li>
  *   <li><b>The message sent before the commit.</b> If anything fails after it, the transaction rolls
  *       back (no purchase, no receipt), but the member has already been told about a receipt that
  *       does not exist, and the card has been charged.</li>
@@ -98,8 +95,12 @@ public class NaivePurchaseService {
                 command.paymentToken(), purchase.getId(), purchase.getId().toString()));
 
         if (reply.outcome() != Outcome.SUCCEEDED) {
-            // Defect 3: a timeout is not a "no". The provider may have charged the card.
-            purchase.markFailed();
+            // Declined or failed: the same rule as the better version. This part is not a defect.
+            if (reply.outcome() == Outcome.DECLINED) {
+                purchase.markDeclined();
+            } else {
+                purchase.markFailed();
+            }
             stock.release(purchase);
             return PurchaseAnswer.of(purchase, null);
         }
@@ -107,7 +108,7 @@ public class NaivePurchaseService {
         purchase.markPaid(reply.providerRef());
         Receipt receipt = Receipt.issueFor(purchase, now);
         entityManager.persist(receipt);
-        // Defect 4: the message leaves now. A rollback after this line cannot take it back.
+        // Defect 3: the message leaves now. A rollback after this line cannot take it back.
         mailbox.send(new ReceiptMailbox.Mail(purchase.getId(), receipt.getNumber(), member.getEmail(),
                 ReceiptMessage.text(receipt, purchase)));
         pauses.observe(TransitionPauses.RECEIPT_ISSUED, member.getId());   // scenarios: "something fails here"

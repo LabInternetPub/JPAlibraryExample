@@ -8,8 +8,6 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.time.Duration;
-
 /**
  * Step 3 of the better purchase: the call to the provider, with no transaction at all.
  *
@@ -17,15 +15,12 @@ import java.time.Duration;
  * from inside a transaction, Spring throws at once instead of silently bringing back the
  * connection held during the network call.
  *
- * <p>Retries: only a 503 (the provider promises it recorded nothing), at most {@value #MAX_CALLS}
- * calls, always with the same provider key (the purchase id). A timeout is never retried here: it
- * is evidence of nothing, and the next request with the same key will ask again anyway.
+ * <p>One call, no retry: a decline or a failure fails the purchase, and the member can start again.
+ * The provider key is the purchase id, so a later attempt for the same purchase (a retry with the
+ * same {@code Idempotency-Key}) can never be charged twice.
  */
 @Service
 public class PaymentCharges {
-
-    static final int MAX_CALLS = 3;
-    private static final Duration BACKOFF = Duration.ofMillis(50);
 
     private final PaymentGateway gateway;
 
@@ -35,32 +30,12 @@ public class PaymentCharges {
 
     @Transactional(propagation = Propagation.NEVER)
     public PaymentEvidence charge(PaymentAttempt attempt, String paymentToken) {
-        Charge charge = new Charge(attempt.amountCents(), attempt.currency(), paymentToken,
-                attempt.purchaseId(), attempt.purchaseId().toString());
-        for (int call = 1; ; call++) {
-            Reply reply = gateway.charge(charge);
-            switch (reply.outcome()) {
-                case SUCCEEDED:
-                    return PaymentEvidence.accepted(reply.providerRef());
-                case DECLINED:
-                    return PaymentEvidence.of(PaymentEvidence.Outcome.DECLINED);
-                case UNKNOWN:
-                    return PaymentEvidence.of(PaymentEvidence.Outcome.UNKNOWN);
-                case RETRYABLE:
-                    if (call == MAX_CALLS) {
-                        return PaymentEvidence.of(PaymentEvidence.Outcome.UNRECORDED_FAILURE);
-                    }
-                    sleep(BACKOFF.multipliedBy(call));
-                    break;
-            }
-        }
-    }
-
-    private static void sleep(Duration duration) {
-        try {
-            Thread.sleep(duration);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
+        Reply reply = gateway.charge(new Charge(attempt.amountCents(), attempt.currency(), paymentToken,
+                attempt.purchaseId(), attempt.purchaseId().toString()));
+        return switch (reply.outcome()) {
+            case SUCCEEDED -> PaymentEvidence.accepted(reply.providerRef());
+            case DECLINED -> PaymentEvidence.of(PaymentEvidence.Outcome.DECLINED);
+            case FAILED -> PaymentEvidence.of(PaymentEvidence.Outcome.FAILED);
+        };
     }
 }

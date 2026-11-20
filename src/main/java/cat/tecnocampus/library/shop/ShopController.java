@@ -18,7 +18,7 @@ import java.util.UUID;
 /**
  * Buying books: naive and better, side by side. The {@code Idempotency-Key} header is mandatory
  * (Spring answers 400 without it). The answer's status follows the purchase: 201 paid, 202 not
- * decided yet, 402 declined, 503 provider failing; see {@link PurchaseAnswer}.
+ * finished yet, 402 declined, 503 provider failed; see {@link PurchaseAnswer}.
  */
 @RestController
 public class ShopController {

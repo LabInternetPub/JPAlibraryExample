@@ -10,7 +10,7 @@ It is the library's version of three problems every shop has, and that Affora's 
 | Problem | What can go wrong |
 | --- | --- |
 | **The same request arrives twice** (double click, browser retry, lost response) | Two purchases and two charges for one click |
-| **The provider is slow, fails or answers late** | The database connection pool runs out; a member pays for books the shop puts back on sale |
+| **The provider is slow, or fails** | The database connection pool runs out and unrelated requests stop answering; a failed payment leaves the copies taken |
 | **Something fails after the money moved** | A member is told about a receipt that does not exist; or never told at all |
 
 Every concept comes with:
@@ -52,7 +52,7 @@ sequenceDiagram
     M->>S: POST /better/purchases<br/>Idempotency-Key: abc<br/>{memberEmail, isbns, paymentToken}
     S->>DB: take one copy of each book in stock
     S->>P: charge the total
-    P-->>S: 201 charged / 402 declined / 503 failed / no answer
+    P-->>S: 201 charged / 402 declined / 503 failed
     S->>DB: paid → receipt, refused → copies back
     S-->>M: 201 + purchase + receipt
     S-)M: message with the receipt
@@ -67,9 +67,10 @@ The rules (the requirements of this example):
   body gets **the original answer, with the original status**. The same key with a different body is
   `422`. Ten simultaneous submissions with one key make **one purchase, one charge, ten identical
   answers**.
-- **Payment.** A **definitive** refusal gives the copies back. An **indeterminate** result keeps them
-  and leaves the purchase for **reconciliation**: never cancel by guesswork. Every network call has a
-  timeout. Retry only what is safe to repeat.
+- **Payment.** The provider succeeds, declines (`402`) or fails (`503`). On a decline or a failure
+  the purchase **fails**: its copies go back on sale and the member gets an error. The charge is
+  **not retried**; the member can start again. **The call to the provider never happens inside a
+  database transaction.**
 - **Receipt.** Once the charge is accepted, a receipt is issued and a message is sent. If anything
   fails after the charge, nothing is issued. A message never announces a receipt that does not
   exist. If the application dies right after committing, the message is still sent when it comes
@@ -85,13 +86,16 @@ test card numbers, so the shop's code never contains a branch for a scenario.
 | --- | --- | --- |
 | `tok_ok` | `201 SUCCEEDED` | charged |
 | `tok_reject` | `402 REJECTED` | refused; asking again will not change it |
-| `tok_fail` | `503` | it failed and **recorded nothing**: safe to ask again |
-| `tok_slow` | the right answer, after a delay (8 s by default) | depends on whether we waited |
-| `tok_pending` | `202 PENDING` | not decided yet |
+| `tok_fail` | `503` | it failed and **recorded nothing** |
+| `tok_slow` | `201 SUCCEEDED`, after a delay (8 s by default; the pool scenario sets 1.5 s) | used to make the provider slow |
 
 It honours an `Idempotency-Key` header: the same key gets the stored answer instead of a second
-charge. Its `/admin` API (reset, delays, failure rate, list of charges) is for scenarios and tests
+charge. Its `/admin` API (reset, delay, failure rate, list of charges) is for scenarios and tests
 only; the shop never calls it.
+
+The gateway can do more (`tok_pending` answers `202 PENDING`, an answer can arrive after the shop
+has stopped waiting). This example leaves those cases out on purpose: see
+[What this example leaves out](#what-this-example-leaves-out).
 
 ### 1.3 The HTTP client: `RestClient`
 
@@ -103,38 +107,36 @@ Three things in that class are deliberate, and are what an assistant usually get
 HttpClient httpClient = HttpClient.newBuilder()
         .connectTimeout(properties.connectTimeout())          // 1 s
         .build();
-JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
-requestFactory.setReadTimeout(properties.readTimeout());      // 2 s
 this.restClient = builder                                     // the RestClient.Builder Spring Boot provides
         .baseUrl(properties.url())
-        .requestFactory(requestFactory)
+        .requestFactory(new JdkClientHttpRequestFactory(httpClient))
         .build();
 ```
 
-1. **Explicit timeouts.** The JDK client under `RestClient` has **no read timeout** unless you set
-   one: a provider that never answers would keep the request waiting for ever. Both timeouts are
-   required properties and are bounded at start-up
-   ([`PaymentGatewayProperties`](../src/main/java/cat/tecnocampus/library/payment/PaymentGatewayProperties.java)).
+1. **The client is configured, not left at its defaults.** The builder Spring Boot provides keeps
+   its JSON converters and metrics; the request factory adds a **connect timeout**: a connection
+   that cannot be opened proves the request never left, so the purchase can fail cleanly. There is
+   deliberately **no read timeout** (see
+   [What this example leaves out](#what-this-example-leaves-out)).
 2. **Statuses are answers, not errors.** `retrieve()` throws on every 4xx and 5xx. Catch that
-   exception generically and a `402` (definitive) and a `503` (retryable) become the same thing. The
-   adapter uses `exchange(...)`, which hands over every response, and maps each status to its own
-   outcome:
+   exception generically and a `402` (declined) and a `503` (provider failing) become the same
+   thing. The adapter uses `exchange(...)`, which hands over every response, and maps each status
+   to its own outcome:
 
    ```java
    .exchange((request, response) -> classify(charge, response));
    ```
 
-   | Observed | Outcome |
-   | --- | --- |
-   | `201` whose amount, currency and reference match the charge, with a provider reference | `SUCCEEDED` |
-   | `402` | `DECLINED` |
-   | `503`, or a connection that was never opened (refused, connect timeout) | `RETRYABLE`: nothing can have been charged |
-   | anything else: read timeout, `202`, malformed body, a `201` that is not ours | `UNKNOWN`: money may have moved |
+   | Observed | Outcome | Purchase |
+   | --- | --- | --- |
+   | `201` whose amount, currency and reference match the charge, with a provider reference | `SUCCEEDED` | `PAID` |
+   | `402` | `DECLINED` | `DECLINED` |
+   | `503`, a connection that cannot be opened, anything else | `FAILED` | `PAYMENT_FAILED` |
 
 3. **A `201` is believed only if it is ours.** Amount, currency and reference are compared with the
    charge. A `201` for another amount is not "paid".
 
-The adapter never throws: a timeout is an outcome like any other.
+The adapter never throws: a provider that cannot be reached is an outcome like any other.
 
 ---
 
@@ -148,7 +150,11 @@ starts and gives it back at the commit or rollback. Everything the method does i
 every request of the application shares it.
 
 `@Transactional(timeout = …)` does **not** limit an HTTP call: Spring checks it when the next SQL
-statement runs. Only the HTTP client's own timeout bounds the wait.
+statement runs. How long the call lasts is decided by the provider.
+
+That is **the main lesson of this example: never call an external system from inside a database
+transaction.** Whatever the transaction holds (a connection from a small pool, often locks on rows)
+stays held for as long as somebody else's system takes to answer.
 
 ### 2.2 A database constraint decides; a check in Java only looks
 
@@ -165,18 +171,17 @@ rolls back afterwards, the effect stays. So the order matters: first make the de
 
 ### 2.4 The states of a purchase
 
-A boolean "paid" cannot say "we do not know", and "we do not know" is the state that must never be
-treated as "no". A purchase ([`domain/Purchase.java`](../src/main/java/cat/tecnocampus/library/domain/Purchase.java)) has five:
+A boolean "paid" is not enough: a purchase can be waiting for its payment, and a refused card and a
+failing provider must be told apart. A purchase
+([`domain/Purchase.java`](../src/main/java/cat/tecnocampus/library/domain/Purchase.java)) has four
+states:
 
 ```mermaid
 stateDiagram-v2
     [*] --> PAYMENT_PENDING: stock taken
     PAYMENT_PENDING --> PAID: 201 that matches
     PAYMENT_PENDING --> DECLINED: 402
-    PAYMENT_PENDING --> PAYMENT_FAILED: 503 x3, nothing in doubt
-    PAYMENT_PENDING --> RECONCILE: timeout, 202, malformed,\nfailure after the answer
-    RECONCILE --> PAID: retry, same key, provider replays its answer
-    RECONCILE --> DECLINED: retry, provider answers 402
+    PAYMENT_PENDING --> PAYMENT_FAILED: 503, provider unreachable
     PAID --> [*]
     DECLINED --> [*]
     PAYMENT_FAILED --> [*]
@@ -185,9 +190,9 @@ stateDiagram-v2
 | State | Copies | Answer | For the member |
 | --- | --- | --- | --- |
 | `PAID` | sold | `201` | bought, here is the receipt |
-| `RECONCILE` | **kept** | `202` | not decided yet; ask again with the same key, or a person will look at it |
+| `PAYMENT_PENDING` | taken | `202` | not finished (recording the payment failed): ask again with the same key |
 | `DECLINED` | back on sale | `402` | your card was refused |
-| `PAYMENT_FAILED` | back on sale | `503` | the provider is failing, nothing was charged, try later |
+| `PAYMENT_FAILED` | back on sale | `503` | the provider failed, nothing was charged, start again later |
 
 The rule that decides is in the entity (`Purchase.settle`): the services only lock the row, call it,
 and do what it says with the stock.
@@ -212,15 +217,15 @@ public PurchaseAnswer purchase(PurchaseCommand command) {
     entityManager.persist(purchase);
 
     Reply reply = gateway.charge(...);                                   // (2) HTTP inside the transaction
-    if (reply.outcome() != Outcome.SUCCEEDED) {                          // (3) a timeout is not a "no"
-        purchase.markFailed();
+    if (reply.outcome() != Outcome.SUCCEEDED) {
+        purchase.markDeclined() / markFailed();                          // this part is fine
         stock.release(purchase);
         return ...;
     }
     purchase.markPaid(reply.providerRef());
     Receipt receipt = Receipt.issueFor(purchase, now);
     entityManager.persist(receipt);
-    mailbox.send(...);                                                   // (4) sent before the commit
+    mailbox.send(...);                                                   // (3) sent before the commit
     return ...;
 }
 ```
@@ -233,8 +238,8 @@ is between transactions, never inside one:
 | --- | --- | --- | --- |
 | Prepare | `PurchasePreparation.prepare` | short | insert the key row (unique), take the stock, create the purchase `PAYMENT_PENDING` |
 | Claim | `PaymentClaims.claim` | short, row locked | settled → answer; another request is charging → wait; otherwise take a 15 s **lease** |
-| Charge | `PaymentCharges.charge` | **none** (`Propagation.NEVER`) | the HTTP call; up to 3 calls on `503`, always with the same provider key |
-| Finish | `PaymentCompletion.finish` | short, row locked | `Purchase.settle`; stock back or kept; on `PAID`, the receipt and its message row |
+| Charge | `PaymentCharges.charge` | **none** (`Propagation.NEVER`) | the HTTP call, once, with the purchase id as the provider's idempotency key |
+| Finish | `PaymentCompletion.finish` | short, row locked | `Purchase.settle`; stock sold or back on sale; on `PAID`, the receipt and its message row |
 | Send | `ReceiptDispatcher.deliverAfterCommit` | own, after the commit | send the message, mark it sent |
 
 ```mermaid
@@ -246,7 +251,7 @@ sequenceDiagram
     PS->>DB: claim: lock purchase, lease (tx 2)
     PS->>P: POST /charges, Idempotency-Key = purchase id
     Note over PS,P: no connection, no lock held
-    P-->>PS: 201 / 402 / 503 / timeout
+    P-->>PS: 201 / 402 / 503
     PS->>DB: finish: lock purchase, settle, receipt + message row (tx 3)
     PS->>DB: send the message, mark it sent (tx 4)
 ```
@@ -373,13 +378,13 @@ never an entity, so nothing lazy can trigger a query, and take a connection, dur
 
 In the better version every purchase answers in about 1.6 s (the provider's 1.5 s plus a few short
 transactions), and the catalogue answers in milliseconds: **nothing else in the application has to
-wait** because the provider is slow. Same pool, same provider, same timeouts; only the lifetime of
-the connection changed.
+wait** because the provider is slow. Same pool, same provider; only the lifetime of the connection
+changed.
 
 **A trap we fell into while building it.** The first better version sent the receipt message from
 an `@TransactionalEventListener(phase = AFTER_COMMIT)` that opened a `REQUIRES_NEW` transaction. In
 the 80-purchase scenario (run then with the 500 ms checkout timeout mentioned above), two runs out
-of three ended with 11 to 20 purchases in `RECONCILE` and Hikari errors showing 73–77 threads
+of three ended with 11 to 20 purchases whose payment could not be recorded, and Hikari errors showing 73–77 threads
 waiting for a connection. The reason: during "after commit",
 the finished transaction's connection is **still bound to the thread** (it is released after the
 listeners). A listener that opens a new transaction holds **two** connections at once: 80 purchases
@@ -388,52 +393,24 @@ finishing together needed up to 160 from a pool of 60, and starved each other. (
 coordinator, which has no transaction, sends the message after `finish` has returned and released
 its connection. Same lesson as above, in a place where nobody looks.
 
-### Lesson 3 · The late answer
+**What happens if the process dies while waiting for the provider?** It depends on where the
+call is, and you must be able to explain both:
 
-**Scenarios** `purchase-late-answer-naive`, `purchase-late-answer-better`: the provider takes 3 s
-(`tok_slow`); the shop's read timeout is 2 s. The provider charges the card; the shop never sees the
-answer. Then the member retries with the same key.
+- **Naive.** The transaction never commits: PostgreSQL rolls it back when the connection drops. No
+  purchase, the copies are back on sale, and the key was never saved. But the provider may have
+  charged the card. A retry with the same key finds nothing, creates a new purchase with a new id
+  (a new provider key) and charges again.
+- **Better.** The purchase was committed `PAYMENT_PENDING` before the call, with its copies taken
+  and a 15 s **lease** (a nonce and an expiry time) recorded by the claim. Nothing else happens until a
+  retry with the same key arrives. Within the 15 s the retry waits; after them it takes over with a
+  new nonce and charges **with the same provider key** (the purchase id): if the first call had
+  charged, the provider answers with its stored `201` (`X-Gateway-Idempotent-Replay: true`) and
+  nothing is charged twice. If the old process somehow comes back and tries to record its answer,
+  its nonce is no longer the current one and it changes nothing (`StockAction.NONE`). If no retry
+  ever comes, the purchase stays `PAYMENT_PENDING` with its copies: this example has no job that
+  cleans it up (a real shop would need one, or a way to ask the provider what happened).
 
-**Measured:**
-
-| Fact | Naive | Better |
-| --- | --- | --- |
-| First request | `503 PAYMENT_FAILED` after 2.03 s | `202 RECONCILE` after 2.05 s |
-| Copies taken after it | **0** (back on sale) | 1 (kept) |
-| Charges at the provider once it has answered | **1** | 1 |
-| Retry with the same key | `503 PAYMENT_FAILED` | `201 PAID` |
-| Receipts | **0** | 1 |
-| Charges at the end | 1 | 1 |
-
-**Why the naive version fails.** It treats "no answer" as "no". A timeout proves nothing: the
-request may have reached the provider, which may have charged. The naive shop put the book back on
-sale and told the member the payment failed; the member was charged. The retry finds the purchase
-`PAYMENT_FAILED` and answers the same: the member paid and has nothing.
-
-**The better version** classifies the timeout as `UNKNOWN`. `Purchase.settle` turns it into
-`RECONCILE`: the copies stay taken, and the answer is `202` (accepted, not decided). The retry with
-the same key claims the payment again and sends the charge **with the same provider key** (the
-purchase id). The provider recognises the key and replays its stored answer, `201`
-(`X-Gateway-Idempotent-Replay: true`), without charging again. The purchase becomes `PAID`; one
-receipt, one charge.
-
-Rules that make it safe:
-
-- **Retry only what is proven unrecorded.** A `503` from this provider means "nothing recorded", so
-  the charge step tries up to 3 calls (50 ms, 100 ms apart). A timeout is never retried blindly, and
-  never with a new key: that is exactly how a member is charged twice.
-- **After an unknown, a `503` proves nothing.** If an earlier attempt may have charged, three `503`
-  now say nothing about that attempt: the purchase stays in `RECONCILE` (`earlierAttemptUnknown`).
-- **`RECONCILE` is not a dead end, and not an automatic release.** A retry can settle it. If nobody
-  retries, `reviewAfter` (24 h) tells a person when to look. Time alone is no evidence that the card
-  was not charged, and this provider has no "what happened to charge X?" endpoint.
-- **The lease.** Claiming the payment records a nonce valid for 15 s. Only the attempt holding the
-  current nonce may record a result. If a process sends the charge and then freezes for longer than
-  the lease, a retry takes over, and when the old process wakes up its result is ignored
-  (`StockAction.NONE`). Two fences together: the provider's key (one charge), our nonce (one
-  decision).
-
-### Lesson 4 · A failure after the charge
+### Lesson 3 · A failure after the charge
 
 **Scenarios** `receipt-failure-naive`, `receipt-failure-better`: something fails right after the
 receipt is issued and before the commit (the scenario injects an exception at that point; in real
@@ -443,7 +420,7 @@ life: a constraint, a bug, a lost connection). Then the member retries with the 
 
 | Fact | Naive | Better |
 | --- | --- | --- |
-| First request | `500` | `202 RECONCILE` |
+| First request | `500` | `202 PAYMENT_PENDING` |
 | Purchases / receipts | **0 / 0** (rolled back) | 1 / 0 |
 | Messages received by the member | **1** | 0 |
 | Charges at the provider | 1 | 1 |
@@ -462,11 +439,14 @@ that does not exist. Worse, since no purchase was left with the key, the retry c
   The message is a row (`ReceiptMessage`, `PENDING`): an **outbox**. A rollback removes all three
   together. Nothing has left the system yet.
 - The message is sent **after** the commit, from the committed row.
-- The provider had already answered when the failure happened, so the money may have moved. The
-  coordinator records `RECONCILE` in a new transaction (`localFailure`) instead of giving the copies
-  back. The retry settles it with the provider's stored answer.
+- The provider had already answered when the failure happened, so the money may have moved: the
+  copies must not go back on sale. Nothing was recorded, so the purchase is still
+  `PAYMENT_PENDING` with its copies, and the answer is `202`. The coordinator gives up the lease in
+  a new transaction (`PaymentCompletion.abandon`), so the retry does not have to wait for it to run
+  out. The retry charges again with the same provider key, and the provider replays its stored
+  `201`: one receipt, one message, one charge.
 
-### Lesson 5 · A crash after the commit
+### Lesson 4 · A crash after the commit
 
 **Scenario** `receipt-restart-better`: the purchase commits, and the application "dies" before
 sending the message (the scenario switches off the send that follows the commit). Then it comes
@@ -505,8 +485,7 @@ on.
 | --- | --- | --- | --- |
 | `tok_ok`, books 5 + 41 (sold out) + 6 | `201 PAID`, 2 bought, 41 skipped, 23.50 € | taken | yes |
 | `tok_reject`, book 7 | `402 DECLINED` | given back | no |
-| `tok_fail`, book 8 | `503 PAYMENT_FAILED` after 3 calls, nothing charged | given back | no |
-| `tok_pending`, book 9 | `202 RECONCILE` | kept | no |
+| `tok_fail`, book 8 | `503 PAYMENT_FAILED` after one call, nothing charged | given back | no |
 | `tok_ok`, book 41 only | `409 nothing available`, nothing created | — | — |
 
 ---
@@ -517,14 +496,39 @@ on.
   winner's purchase and wait for its answer.
 - **Short transactions**; the provider is called with **no transaction** (`Propagation.NEVER`),
   with plain values, never entities.
-- `RestClient` with **explicit connect and read timeouts**; every status mapped with `exchange`; a
+- `RestClient` configured with a **connect timeout**; every status mapped with `exchange`; a
   `201` checked against the charge.
-- **The provider key is the purchase id**, the same on every attempt; only `503` is retried.
-- The rule is in the entity: **settle** says `PAID` / `DECLINED` / `PAYMENT_FAILED` / `RECONCILE` and
-  what to do with the stock. Unknown means **keep the copies**.
-- A **lease with a nonce**: one attempt at a time, and a late attempt cannot decide.
+- **One call, no retry.** A decline or a failure fails the purchase and gives the copies back.
+- **The provider key is the purchase id**, so any later attempt for the same purchase is answered
+  with the provider's stored answer instead of a second charge.
+- The rule is in the entity: **settle** says `PAID` / `DECLINED` / `PAYMENT_FAILED` and what to do
+  with the stock.
+- A **lease with a nonce**: one attempt at a time, a process that died is replaced after 15 s, and a
+  late attempt cannot decide.
 - Receipt and message row **in the same transaction** as `PAID`; the message is sent **after the
   commit**, by code that holds no other connection, and by a job for what is left; **at least once**.
+
+### What this example leaves out
+
+Deliverable 4 (and this example) deliberately leave out the **indeterminate outcome**: an answer
+that does not say whether the money moved. In a real shop it shows up as a read timeout, a
+`202 PENDING`, or a connection that breaks after the request was sent. Handling it needs a state of
+its own ("we do not know: keep the copies"), a way to settle it later (retry with the same key, or
+ask the provider), and a person when nothing else works. That is why:
+
+- **There is no read timeout.** A read timeout gives up on a request the provider already has and
+  may be charging; it would bring the indeterminate case back. Once the request is sent, the shop
+  waits for the answer.
+- **There is no retry.** Retrying a `503` is safe with this provider, but it is not asked for: the
+  member can start again.
+- **`tok_pending` and late answers are not handled.** The gateway can still produce them (the
+  pool scenario uses `tok_slow` to make it slow), but the shop treats anything that is not a `201`
+  or a `402` as a failure.
+
+The price is honest to state: if the provider charges and the shop never learns it (the process
+dies and nobody retries, or a takeover gets a `503` while the first call is still being charged),
+the shop and the provider disagree. *Timeouts and when a retry is safe* is advisable vocabulary
+for this course, not required.
 
 ## 6. Mistakes to avoid
 
@@ -536,15 +540,15 @@ Most of these are what an assistant produces by default:
 3. "Fixing" it with `REQUIRES_NEW` around the database work: the outer transaction is suspended but
    **keeps its connection**; each request now holds two. (The `AFTER_COMMIT` listener of lesson 2 is
    the same trap.)
-4. No read timeout, or `retrieve()` with a generic `catch`: a `402` and a `503` become the same.
-5. Treating a timeout or any exception as "declined" and releasing the copies.
-6. Retrying every failure, or with a new idempotency key per attempt.
+4. `retrieve()` with a generic `catch`: a `402` and a `503` become the same.
+5. Releasing the copies when *recording* the answer fails: the provider may have charged.
+6. A new provider idempotency key per attempt of the same purchase.
 7. Accepting any `201` without checking amount, currency and reference.
 8. A boolean `paid`.
 9. "Look for the key, insert if missing" without a constraint.
 10. Sending the message inside the transaction, or from an `AFTER_COMMIT` listener that opens a new
     transaction.
-11. Testing only with an in-memory fake provider: no timeout, no late answer, no `503` is ever
+11. Testing only with an in-memory fake provider: no slow answer, no `503`, no real HTTP is ever
     exercised. The tests here use the real simulator over HTTP, in a container.
 
 ## 7. Questions to check your understanding
@@ -554,9 +558,11 @@ Most of these are what an assistant produces by default:
 2. Why does a slow provider make the catalogue slow, and eventually fail? Which resource runs out,
    and why would a larger pool not fix it? What does `@Transactional(timeout = 15)` actually bound?
 3. Which observation in the pool scenario proves that no connection is held during the HTTP call?
-4. Why is a timeout different from a decline? What evidence allows giving the copies back?
-5. Why must a retry reuse the same provider key? What happens if it does not?
-6. A purchase has been in `RECONCILE` for two days. What may and may not happen to its copies?
+4. Which transactions does the better purchase run, and what does each one hold? Which one is
+   running while the provider is called?
+5. The process dies while waiting for the provider. What happens to the purchase and its copies,
+   in the naive version and in the better one? What does a retry with the same key do?
+6. Why must a retry reuse the same provider key? What happens if it does not?
 7. A process sends the charge, then freezes for 20 s, then tries to record the result. What stops
    it, and why are both the provider's key and the lease nonce needed?
 8. Why is the message written as a row in the same transaction, instead of being sent there? What
@@ -574,10 +580,8 @@ Most of these are what an assistant produces by default:
   was read. Fixed by a constraint, a lock or a conditional statement.
 - **Connection pool / pool starvation**: the fixed set of database connections the application shares;
   starvation is when requests hold them without using them and others cannot get one.
-- **Timeout (connect / read)**: how long to wait to open the connection / to get the answer.
-- **Definitive vs indeterminate outcome**: a result that proves what happened (`402`, `503` that
-  recorded nothing) versus one that does not (timeout, `202`).
-- **Reconciliation**: settling an indeterminate outcome later, with more evidence (a retry, a person).
+- **Why a network call does not belong inside a database transaction**: everything the transaction
+  holds stays held for as long as the other system takes.
 - **Outbox**: writing the message to send as a row in the same transaction as the change it reports,
   and sending it after the commit.
 - **At least once / at most once**: an effect that may repeat but is never lost / that is never
@@ -585,6 +589,9 @@ Most of these are what an assistant produces by default:
 
 **Advisable**
 
+- **Timeouts (connect / read) and when a retry is safe**: a connect timeout proves the request never
+  left; a read timeout proves nothing, so the result is indeterminate (see
+  [What this example leaves out](#what-this-example-leaves-out)).
 - **Lease and fencing nonce**: a time-limited right to act, identified by a value that a later holder
   replaces, so a late actor can be recognised and ignored.
 - **Little's law**: work in progress = throughput × time in the system.

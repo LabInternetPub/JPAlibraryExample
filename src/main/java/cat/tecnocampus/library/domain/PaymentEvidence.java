@@ -3,8 +3,8 @@ package cat.tecnocampus.library.domain;
 import java.util.Objects;
 
 /**
- * What the payment provider's answers prove about the money, after the retries. The domain
- * decides with this, never with an HTTP status or an exception.
+ * What the payment provider's answer says about the money. The domain decides with this, never
+ * with an HTTP status or an exception.
  *
  * @param outcome     what is proven
  * @param providerRef the provider's reference of the charge, only when it was accepted
@@ -16,10 +16,8 @@ public record PaymentEvidence(Outcome outcome, String providerRef) {
         ACCEPTED,
         /** A 402: the provider refused. No money was taken, and asking again will not change it. */
         DECLINED,
-        /** A 503 on every attempt: the provider says it recorded nothing. */
-        UNRECORDED_FAILURE,
-        /** No usable answer (timeout, 202, malformed or mismatching body): money may have been taken. */
-        UNKNOWN
+        /** Anything else (a 503 above all): the provider failed and recorded nothing. Not retried. */
+        FAILED
     }
 
     public PaymentEvidence {

@@ -2,7 +2,6 @@ package cat.tecnocampus.library.shop;
 
 import cat.tecnocampus.library.GatewayContainerConfiguration;
 import cat.tecnocampus.library.TestcontainersConfiguration;
-import cat.tecnocampus.library.domain.PurchaseStatus;
 import cat.tecnocampus.library.scenario.ConcurrentRun;
 import cat.tecnocampus.library.scenario.ConcurrentRun.Attempt;
 import cat.tecnocampus.library.scenario.RaceWindow;
@@ -71,21 +70,6 @@ class NaivePurchaseTest {
         assertThat(demo.purchasesOf(ANNA)).isEqualTo(10);
         assertThat(demo.gateway().charges()).hasSize(10);
         assertThat(demo.mailsTo(ANNA)).isEqualTo(10);
-    }
-
-    @Test
-    void aLateAnswerPutsPaidBooksBackOnSale() throws InterruptedException {
-        // Given
-        demo.gateway().slowResponseMillis(2_500);
-
-        // When
-        PurchaseAnswer answer = naive.purchase(new PurchaseCommand(ANNA, "late", List.of(isbn(1)), "tok_slow"));
-        Thread.sleep(1_000);
-
-        // Then
-        assertThat(answer.body().status()).isEqualTo(PurchaseStatus.PAYMENT_FAILED);
-        assertThat(demo.taken(isbn(1))).isZero();
-        assertThat(demo.gateway().charges()).hasSize(1);       // the card was charged
     }
 
     @Test

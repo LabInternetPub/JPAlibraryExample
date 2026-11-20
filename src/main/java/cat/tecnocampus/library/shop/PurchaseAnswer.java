@@ -14,9 +14,9 @@ import cat.tecnocampus.library.domain.Receipt;
  * <table>
  *   <tr><th>Purchase</th><th>Answer</th><th>For the client</th></tr>
  *   <tr><td>PAID</td><td>201</td><td>bought, here is the receipt</td></tr>
- *   <tr><td>RECONCILE, PAYMENT_PENDING</td><td>202</td><td>not decided yet: ask again with the same key, or look at the purchase later</td></tr>
+ *   <tr><td>PAYMENT_PENDING</td><td>202</td><td>not finished (recording the payment failed, or another request is still charging): ask again with the same key</td></tr>
  *   <tr><td>DECLINED</td><td>402</td><td>the card was refused: use another one (with a new key)</td></tr>
- *   <tr><td>PAYMENT_FAILED</td><td>503</td><td>the provider is failing, nothing was charged: try later (with a new key)</td></tr>
+ *   <tr><td>PAYMENT_FAILED</td><td>503</td><td>the provider failed, nothing was charged: try later (with a new key)</td></tr>
  * </table>
  */
 public record PurchaseAnswer(int httpStatus, PurchaseResponse body) {
@@ -28,7 +28,7 @@ public record PurchaseAnswer(int httpStatus, PurchaseResponse body) {
     static int statusFor(PurchaseStatus status) {
         return switch (status) {
             case PAID -> 201;
-            case RECONCILE, PAYMENT_PENDING -> 202;
+            case PAYMENT_PENDING -> 202;
             case DECLINED -> 402;
             case PAYMENT_FAILED -> 503;
         };

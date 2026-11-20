@@ -85,8 +85,8 @@ class PurchaseJourneyTest {
                 .bodyJson().extractingPath("$.type").isEqualTo("/problems/nothing-available");
         assertThat(buy("j-402", body("tok_reject", isbn(3)))).hasStatus(HttpStatus.PAYMENT_REQUIRED)
                 .bodyJson().extractingPath("$.status").isEqualTo("DECLINED");
-        assertThat(buy("j-202", body("tok_pending", isbn(4)))).hasStatus(HttpStatus.ACCEPTED)
-                .bodyJson().extractingPath("$.status").isEqualTo("RECONCILE");
+        assertThat(buy("j-503", body("tok_fail", isbn(4)))).hasStatus(HttpStatus.SERVICE_UNAVAILABLE)
+                .bodyJson().extractingPath("$.status").isEqualTo("PAYMENT_FAILED");
         assertThat(buy("j-402", body("tok_reject", isbn(5)))).hasStatus(HttpStatus.UNPROCESSABLE_CONTENT)
                 .bodyJson().extractingPath("$.type").isEqualTo("/problems/idempotency-key-reused");
     }

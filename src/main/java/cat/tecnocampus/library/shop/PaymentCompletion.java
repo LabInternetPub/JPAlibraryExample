@@ -54,24 +54,26 @@ public class PaymentCompletion {
     @Transactional(timeout = 5)
     public Completed finish(PaymentAttempt attempt, PaymentEvidence evidence) {
         Purchase purchase = lock(attempt.purchaseId());
-        Instant now = clock.instant();
-        StockAction action = purchase.settle(attempt.lease(), evidence, now);
+        StockAction action = purchase.settle(attempt.lease(), evidence);
         UUID messageId = null;
         switch (action) {
-            case SELL -> messageId = issueReceipt(purchase, now);
+            case SELL -> messageId = issueReceipt(purchase, clock.instant());
             case RELEASE -> stock.release(purchase);
-            case RETAIN, NONE -> {
-                // RETAIN: the money may have moved, the copies stay taken.
-                // NONE: this attempt lost its lease; the one that holds it decides.
+            case NONE -> {
+                // This attempt lost its lease; the one that holds it decides.
             }
         }
         return new Completed(action, messageId);
     }
 
-    /** The finish threw after the provider answered: the money may have moved. */
+    /**
+     * The finish threw and rolled back after the provider answered: nothing was recorded, the
+     * purchase is still {@code PAYMENT_PENDING} with its copies. Give up the lease, so a retry with
+     * the same key can charge again at once (same provider key: no second charge).
+     */
     @Transactional(timeout = 5)
-    public void localFailure(PaymentAttempt attempt) {
-        lock(attempt.purchaseId()).localFailure(attempt.lease(), clock.instant());
+    public void abandon(PaymentAttempt attempt) {
+        lock(attempt.purchaseId()).abandonAttempt(attempt.lease());
     }
 
     private UUID issueReceipt(Purchase purchase, Instant now) {
