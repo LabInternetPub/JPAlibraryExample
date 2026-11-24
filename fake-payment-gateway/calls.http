@@ -1,0 +1,301 @@
+### Fake payment gateway: try every token, then idempotency.
+### Start the gateway first:  cd fake-payment-gateway && ./mvnw spring-boot:run   (listens on 9090)
+### Every charge response carries the header X-Gateway-Idempotent-Replay: true|false.
+
+@gw = http://localhost:9090
+
+
+############################################################################################
+### 0. Admin: start clean and look at the knobs
+############################################################################################
+
+### Reset charges and settings
+POST {{gw}}/admin/reset
+
+### Current settings
+GET {{gw}}/admin/config
+
+### Make the slow scenario quick enough to watch (partial update)
+POST {{gw}}/admin/config
+Content-Type: application/json
+
+{
+  "slowResponseMillis": 3000
+}
+
+
+############################################################################################
+### 1. Tokens, one by one (no Idempotency-Key: every call is a brand new charge)
+############################################################################################
+
+### tok_ok -> 201 SUCCEEDED
+POST {{gw}}/charges
+Content-Type: application/json
+
+{
+  "amountCents": 1999,
+  "currency": "EUR",
+  "paymentToken": "tok_ok",
+  "reference": "order-ok"
+}
+
+### Unknown token -> behaves like tok_ok (201 SUCCEEDED)
+POST {{gw}}/charges
+Content-Type: application/json
+
+{
+  "amountCents": 1999,
+  "paymentToken": "tok_whatever",
+  "reference": "order-unknown"
+}
+
+### No token at all -> also 201 SUCCEEDED; currency defaults to EUR
+POST {{gw}}/charges
+Content-Type: application/json
+
+{
+  "amountCents": 1999,
+  "reference": "order-no-token"
+}
+
+### tok_reject -> 402 REJECTED, declineReason=card_declined (definitive, do not retry)
+POST {{gw}}/charges
+Content-Type: application/json
+
+{
+  "amountCents": 1999,
+  "currency": "EUR",
+  "paymentToken": "tok_reject",
+  "reference": "order-reject"
+}
+
+### tok_fail -> 503 gateway_unavailable, NOTHING is recorded (check /admin/charges)
+POST {{gw}}/charges
+Content-Type: application/json
+
+{
+  "amountCents": 1999,
+  "currency": "EUR",
+  "paymentToken": "tok_fail",
+  "reference": "order-fail"
+}
+
+### tok_slow -> 201 SUCCEEDED, but only after slowResponseMillis (3 s after the config above, 8 s by default)
+POST {{gw}}/charges
+Content-Type: application/json
+
+{
+  "amountCents": 1999,
+  "currency": "EUR",
+  "paymentToken": "tok_slow",
+  "reference": "order-slow"
+}
+
+### Tokens are case-insensitive and trimmed: this is tok_reject -> 402
+POST {{gw}}/charges
+Content-Type: application/json
+
+{
+  "amountCents": 1999,
+  "paymentToken": "  TOK_REJECT ",
+  "reference": "order-reject-upper"
+}
+
+### Invalid request: amountCents must be positive -> 400 invalid_request
+POST {{gw}}/charges
+Content-Type: application/json
+
+{
+  "amountCents": 0,
+  "paymentToken": "tok_ok"
+}
+
+### Invalid request: no body -> 400 invalid_request
+POST {{gw}}/charges
+
+### What was really charged? (tok_fail is missing; there is one entry per other call)
+GET {{gw}}/admin/charges
+
+
+############################################################################################
+### 2. Idempotency
+############################################################################################
+
+### Start clean so the fixed keys below are unused
+POST {{gw}}/admin/reset
+
+### 2.1 First call with key idem-1 -> 201, X-Gateway-Idempotent-Replay: false
+POST {{gw}}/charges
+Content-Type: application/json
+Idempotency-Key: idem-1
+
+{
+  "amountCents": 2500,
+  "currency": "EUR",
+  "paymentToken": "tok_ok",
+  "reference": "order-idem-1"
+}
+
+### 2.2 Same key, same body -> same providerRef and createdAt, X-Gateway-Idempotent-Replay: true
+POST {{gw}}/charges
+Content-Type: application/json
+Idempotency-Key: idem-1
+
+{
+  "amountCents": 2500,
+  "currency": "EUR",
+  "paymentToken": "tok_ok",
+  "reference": "order-idem-1"
+}
+
+### 2.3 Same key, DIFFERENT body -> still the original answer (amountCents stays 2500).
+###     The key alone identifies the request; the gateway does not compare bodies.
+POST {{gw}}/charges
+Content-Type: application/json
+Idempotency-Key: idem-1
+
+{
+  "amountCents": 9999,
+  "currency": "USD",
+  "paymentToken": "tok_reject",
+  "reference": "something-else"
+}
+
+### 2.4 A rejection is remembered too: key idem-2 with tok_reject -> 402, replay false
+POST {{gw}}/charges
+Content-Type: application/json
+Idempotency-Key: idem-2
+
+{
+  "amountCents": 2500,
+  "paymentToken": "tok_reject",
+  "reference": "order-idem-2"
+}
+
+### 2.5 Retrying idem-2 with a good token does not help -> 402 again, replay true. Use a new key.
+POST {{gw}}/charges
+Content-Type: application/json
+Idempotency-Key: idem-2
+
+{
+  "amountCents": 2500,
+  "paymentToken": "tok_ok",
+  "reference": "order-idem-2"
+}
+
+### 2.6 A 503 records nothing: key idem-3 with tok_fail -> 503
+POST {{gw}}/charges
+Content-Type: application/json
+Idempotency-Key: idem-3
+
+{
+  "amountCents": 2500,
+  "paymentToken": "tok_fail",
+  "reference": "order-idem-3"
+}
+
+### 2.7 ...so retrying idem-3 is a fresh charge -> 201, replay FALSE (this is the safe retry)
+POST {{gw}}/charges
+Content-Type: application/json
+Idempotency-Key: idem-3
+
+{
+  "amountCents": 2500,
+  "paymentToken": "tok_ok",
+  "reference": "order-idem-3"
+}
+
+### 2.8 Replays skip tok_slow's delay: key idem-4 with tok_slow waits slowResponseMillis...
+POST {{gw}}/charges
+Content-Type: application/json
+Idempotency-Key: idem-4
+
+{
+  "amountCents": 2500,
+  "paymentToken": "tok_slow",
+  "reference": "order-idem-4"
+}
+
+### 2.9 ...the replay answers immediately with the same charge
+POST {{gw}}/charges
+Content-Type: application/json
+Idempotency-Key: idem-4
+
+{
+  "amountCents": 2500,
+  "paymentToken": "tok_slow",
+  "reference": "order-idem-4"
+}
+
+### 2.10 Without a key nothing is deduplicated: run this twice -> two different providerRefs
+POST {{gw}}/charges
+Content-Type: application/json
+
+{
+  "amountCents": 2500,
+  "paymentToken": "tok_ok",
+  "reference": "order-no-key"
+}
+
+### 2.11 One charge per key: idem-1, idem-2, idem-3, idem-4 plus one per no-key call
+GET {{gw}}/admin/charges
+
+
+############################################################################################
+### 3. Idempotency under injected failures (Session 7: failureRate 0.3)
+############################################################################################
+
+### Every new charge fails with 503
+POST {{gw}}/admin/config
+Content-Type: application/json
+
+{
+  "failureRate": 1.0
+}
+
+### 3.1 A known key is answered BEFORE failure injection -> idem-1 still replays 201
+POST {{gw}}/charges
+Content-Type: application/json
+Idempotency-Key: idem-1
+
+{
+  "amountCents": 2500,
+  "paymentToken": "tok_ok",
+  "reference": "order-idem-1"
+}
+
+### 3.2 A new key hits the injected failure -> 503, nothing recorded
+POST {{gw}}/charges
+Content-Type: application/json
+Idempotency-Key: idem-5
+
+{
+  "amountCents": 2500,
+  "paymentToken": "tok_ok",
+  "reference": "order-idem-5"
+}
+
+### Realistic setting: 30% of new charges fail
+POST {{gw}}/admin/config
+Content-Type: application/json
+
+{
+  "failureRate": 0.3
+}
+
+### 3.3 Retry this one until it returns 201 (replay false); afterwards it always replays (true)
+POST {{gw}}/charges
+Content-Type: application/json
+Idempotency-Key: idem-5
+
+{
+  "amountCents": 2500,
+  "paymentToken": "tok_ok",
+  "reference": "order-idem-5"
+}
+
+### 3.4 However many retries it took, idem-5 appears exactly once
+GET {{gw}}/admin/charges
+
+### Back to the start-up settings
+POST {{gw}}/admin/reset
