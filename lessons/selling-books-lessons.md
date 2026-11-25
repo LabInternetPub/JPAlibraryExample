@@ -261,6 +261,130 @@ Both versions share the stock (`ShopStock`): taking a copy is one conditional st
 a copy was left (the lesson of the last copy, again). Offers are taken in id order, the same for
 every purchase, so two purchases of overlapping lists cannot deadlock.
 
+### Prepare and claim: two steps, not one
+
+Creating the purchase and getting the right to charge it could look like one step. They are two
+because they answer different questions, and run a different number of times: **prepare** decides
+*what is bought*, **once per key**; **claim** decides *who may pay now*, **as many times as
+needed**, by whichever request is there.
+
+```
+prepare (once per key) ─► claim ─► claim ─► claim ... ─► charge ─► finish
+                            BUSY    BUSY    GRANTED
+```
+
+1. **Claim runs many times, by requests that created nothing.** It is called by the request that
+   created the purchase; by every retry that found it already there (`knownPurchase`) or lost the
+   insert race (`afterCollision`); again every 50 ms while another attempt is charging (`BUSY`);
+   and after a lease ran out or was given up, to take over. If the right to charge were granted
+   only when the purchase is created, only its creator could ever pay it: after a crash, a retry
+   would find a `PAYMENT_PENDING` purchase holding its copies, and no way to pay it. Since the claim
+   must exist on its own, **everybody, the creator included, goes through it**: one path grants the
+   right to charge.
+2. **Different transactions, different locks.**
+
+   | | `prepare` | `claim` |
+   | --- | --- | --- |
+   | Timeout | 10 s | 5 s |
+   | Touches | the key's unique index, the **stock**, inserts the purchase | **one** purchase row (`lockById`) |
+   | May wait for | another request's key insert, the stock | the same purchase's row, for an instant |
+
+   `prepare` is the heavy, contended step: it competes with every buyer for the same copies.
+   `claim` locks one row, compares two columns, writes two, and commits. Apart, the polling loop
+   runs only the small transaction, no transaction holds stock while deciding who charges, and
+   each lock is held as briefly as possible.
+3. **The loser of the race needs new transactions anyway.** Its `prepare` failed on the unique
+   index and rolled back; that transaction cannot grant anything. It continues with
+   `afterCollision` and then `claim`, the same flow as everybody else, with no special case.
+4. **Two different things.** The purchase is lasting business state (what was bought, the copies,
+   the total, the status), and must survive crashes and retries. The lease is passing coordination
+   state (who talks to the provider right now, and until when). A purchase can exist with no lease:
+   after a crash, after `abandon`, between attempts.
+
+The price is one extra short transaction for the creator (`prepare` commits, then `claim` locks the
+row it has just created). Granting the creator's lease inside `prepare` would save it, at the cost
+of a second place that grants leases, with its own edge cases.
+
+### The lease: the right to charge, for a limited time
+
+A **lease** is a temporary, exclusive right to charge the purchase, written in two columns of the
+purchase row
+([`domain/Purchase.java`](../src/main/java/cat/tecnocampus/library/domain/Purchase.java)):
+
+```java
+private UUID paymentLease;   // who holds the right: a random nonce, one per attempt
+private Instant leaseUntil;  // until when: now + PAYMENT_LEASE (15 s)
+```
+
+As with renting, you have it for a limited time, and if you do not give it back it becomes free
+anyway when the time is up.
+
+**Why not a lock.** "Only one at a time" is usually a row lock, but a lock lives in a transaction,
+and the charge happens between transactions (section 2.1). So the right is written **in the row**,
+in a short transaction (`claim`), and the lock ends at its commit, **before** the HTTP call. The row
+lock protects the moment the lease is handed out; the lease protects the charge.
+
+**How `claimPayment` decides** (called with the row locked):
+
+```java
+if (status.isSettled())                               → SETTLED  (paid, declined or failed: nothing to do)
+if (paymentLease != null && now.isBefore(leaseUntil)) → BUSY     (another attempt is charging now)
+otherwise: paymentLease = new UUID, leaseUntil = now + 15 s → GRANTED (you may charge)
+```
+
+`PurchaseService` charges on `GRANTED`, waits 50 ms and claims again on `BUSY` (for up to 15 s, then
+`503`), and answers from the purchase on `SETTLED`.
+
+**Why it expires: no stuck purchases.** The obvious alternative is a status `CHARGING`. If the
+process dies in the middle (crash, deployment, out of memory), nobody puts the status back, and the
+purchase stays `CHARGING` for ever, holding its copies. A lease needs no cleaning: if its holder
+dies, `leaseUntil` passes and the next claim is `GRANTED` with a new lease. That is the comment in
+`Purchase`: *"Not a status: when an attempt dies, its lease simply runs out and the next claim
+takes over."* Taking over does not charge twice, because the new attempt uses **the same provider
+key** (the purchase id): the provider replays its stored answer, or makes the one charge that never
+happened.
+
+**Why a nonce and not only a time: fencing.** The UUID says **which** attempt holds the right, and
+only that attempt may decide:
+
+```java
+public StockAction settle(UUID lease, PaymentEvidence evidence) {
+    if (!holdsLease(lease)) return StockAction.NONE;   // you were replaced: change nothing
+    ...
+}
+```
+
+It matters because there is no read timeout, so a slow attempt can outlive its own lease:
+
+```
+t=0     A claims → lease L1 (until t=15)        A calls the provider... (slow)
+t=16    B claims → L1 expired → lease L2         B calls the provider, same provider key
+t=17    B gets the answer → settle(L2) ✔          PAID, stock sold, receipt
+t=20    A finally gets its answer → settle(L1) ✘  NONE, changes nothing
+```
+
+Without the nonce, A would also write its result: it could overwrite B's decision, give back copies
+already sold, or issue a second receipt.
+
+**Giving it back early: `abandon`.** If the provider answered but recording the result failed (the
+`finish` transaction rolled back), the purchase is still `PAYMENT_PENDING` with its copies.
+`abandonAttempt(lease)` then clears the lease at once, if this attempt still holds it, so a retry
+does not wait 15 s: it claims, charges with the same provider key, and gets the same answer
+(lesson 3).
+
+| Part | Meaning |
+| --- | --- |
+| `paymentLease` (UUID) | which attempt has the right to charge now; only it may settle |
+| `leaseUntil` | when that right ends by itself if its holder disappears |
+| `BUSY` | a live lease held by someone else: wait for its answer |
+| Expired lease | the holder is presumed dead: take over, same provider key |
+| `settle` with an old lease | that attempt was replaced: its result is ignored |
+| `abandon` | give the right back early, so a retry does not wait for the expiry |
+
+The row lock makes sure only one request at a time can *obtain* a lease; the lease makes sure only
+one attempt at a time *charges and decides*, with no database lock held during the HTTP call; the
+expiry makes sure a crash never leaves a purchase stuck.
+
 ---
 
 ## 4. The lessons
@@ -311,6 +435,66 @@ Two details:
   the *same* request; the same key with other books is `422`, not a replay of something else.
 - **Where the answer comes from.** It is not stored: it is rebuilt from the purchase, and a settled
   purchase never changes. Same purchase, same answer.
+
+**Two ways to find the key, and why both.** Before inserting, `prepare` first *looks* for the key:
+
+```java
+@Transactional(timeout = 10)
+public UUID prepare(PurchaseCommand command) {
+    Member member = reads.member(command.memberEmail());
+    Optional<UUID> known = knownPurchase(member.getId(), command);
+    if (known.isPresent()) {
+        return known.get();       // a retry that arrives after the first request committed
+    }
+    UUID purchaseId = UUID.randomUUID();
+    entityManager.persist(new PurchaseKey(member.getId(), command.idempotencyKey(), command.fingerprint(), purchaseId));
+    flushKey();                   // the unique index decides now, not at commit
+    ...
+```
+
+`knownPurchase` reads the key row of (member, key):
+
+- **No row**: a new request; carry on, insert the key, take the stock, create the purchase.
+- **A row with the same fingerprint**: the same request again; return the **existing** purchase id
+  at once. No new key, no new purchase, **no stock taken again**.
+- **A row with another fingerprint**: the key reused for a different request; `422`
+  (`IdempotencyKeyReusedException`).
+
+Returning the existing id does not mean "answer now": the coordinator then claims the purchase
+(see [Prepare and claim](#prepare-and-claim-two-steps-not-one)), and the retry joins it wherever it
+is: settled → the same answer; someone charging → wait; an earlier attempt abandoned → charge again
+with the same provider key.
+
+*But the insert and the flush already detect an existing key. Why look first?* For **correctness**
+the look is **not needed**. Without it, a retry would try to insert the key; the row is already
+committed, so PostgreSQL rejects the insert **at once** (it only waits when the other transaction
+has not committed yet); `flushKey()` turns that into `KeyTakenException`; the transaction rolls back
+before taking any stock; and `afterCollision` calls the same `knownPurchase` in a new transaction,
+which returns the same purchase id, or `422` if the fingerprint differs. Same result.
+
+The two mechanisms cover different timings:
+
+| Situation | What catches it |
+| --- | --- |
+| **Sequential retry**: the first request committed, then the retry arrives (timeout on the client, a second click, a network retry). The usual case. | **`knownPurchase`**: one `SELECT`, no failed insert |
+| **Concurrent duplicates**: both requests are inside `prepare` and neither has committed | **The unique index + `flushKey()`**: the second insert waits, fails when the first commits, then `afterCollision` |
+
+The look alone would be wrong: it is check-then-act, and two concurrent requests can both see
+"no row". The constraint is the guarantee. The look is a **fast path** for the common case, and it
+saves, on every ordinary retry:
+
+- **a transaction**: without it, a failed insert, a rollback, then a second (read-only) transaction
+  in `afterCollision`; with it, one `SELECT` in one transaction;
+- **exceptions as normal flow**: a retry is expected, not an error; without the look it would go
+  through a constraint violation, a Hibernate exception, `KeyTakenException`, a catch and a rollback
+  (after a constraint violation the persistence context cannot be used any more, which is why
+  `afterCollision` needs a new transaction);
+- **noise in the logs**: PostgreSQL logs `ERROR: duplicate key value violates unique constraint`
+  for every failed insert; every retry would leave one, and hide the real errors.
+
+It is also **the first thing** after loading the member: the key belongs to the member (two members
+may use the same key value), and it must come **before `stock.take(...)`**, or a retry would take
+copies again for a purchase nobody will pay.
 
 **Decisions you must be able to justify:**
 
@@ -569,6 +753,13 @@ Most of these are what an assistant produces by default:
    guarantee do you get, and why not "exactly once"?
 9. Why did sending the message from an `AFTER_COMMIT` listener starve the pool?
 10. Why does `RestClient`'s `retrieve()` need care here, and what does `exchange(...)` change?
+11. `prepare` looks for the key before inserting it, but the unique constraint would catch the
+    retry anyway. Is the look needed for correctness? What does it save, and why is it not enough
+    on its own?
+12. Why are creating the purchase and claiming the right to charge it two steps? Which requests
+    call each, and how many times?
+13. Why is the right to charge a lease that expires, and not a row lock or a `CHARGING` status?
+    What does the nonce add to the expiry time?
 
 ## 8. Glossary
 
